@@ -1,0 +1,26 @@
+# Include documentation files
+include README.md
+include README_clickhouse.md
+include LICENSE
+
+# Include configuration files
+include requirements.txt
+include pyproject.toml
+
+# Include SQL schema files
+include *.sql
+
+# Include example files (if needed)
+# include examples/*.py
+
+# Exclude development files
+exclude .gitignore
+exclude .vscode/*
+exclude venv/*
+exclude __pycache__/*
+exclude *.pyc
+exclude *.pyo
+exclude .pytest_cache/*
+exclude .mypy_cache/*
+exclude .coverage
+exclude htmlcov/*

@@ -1,0 +1,16 @@
+# Core dependencies
+clickhouse-driver>=0.2.0
+python-bitcoinlib>=0.12.0
+plyvel>=1.5.0
+lz4>=4.0.0
+zstandard>=0.21.0
+python-dotenv>=1.0.0
+
+# Testing dependencies
+pytest>=6.0
+pytest-cov
+
+# Development dependencies
+black
+flake8
+mypy
