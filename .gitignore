@@ -1,0 +1,9 @@
+__pycache__
+*.pyc
+.env
+venv
+*.log
+python-bitcoin-blockchain-parser
+clickhouse_schema.sql
+bitcoin_parser_example.py
+
