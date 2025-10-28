@@ -201,7 +201,7 @@ class Bitcoin2ClickHouseDaemon:
             unloaded_blocks.sort(key=lambda x: x.height)
             self.logger.info(f"Sorted blocks from {min(block_idx.height for block_idx in unloaded_blocks)} to {max(block_idx.height for block_idx in unloaded_blocks)}")
             
-            max_chunk_size = 3
+            max_chunk_size = 1008
             remaining_blocks = unloaded_blocks.copy()
             completed_rounds = 0
             

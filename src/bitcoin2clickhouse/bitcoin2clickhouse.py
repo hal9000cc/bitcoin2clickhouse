@@ -129,9 +129,9 @@ class BitcoinClickHouseLoader:
 
         try:
             result = client.execute(
-                "SELECT count() FROM db_version"
+                "SHOW TABLES WHERE name = 'db_version'"
             )
-            return result[0][0] > 0
+            return len(result) > 0
         except Exception as e:
             self.logger.error(format_error_with_location(e, "Error checking database initialization: "))
             raise e
@@ -148,7 +148,7 @@ class BitcoinClickHouseLoader:
             for input_index, input_tx in enumerate(transaction.inputs):
                 input_data = {
                     'n_block': block.height,
-                    'transaction_hash': self._hex2hash32(transaction.hash),
+                    'transaction_hash': self._hex2hash32(transaction.txid),
                     'input_index': input_index,
                     'prev_tx_hash': self._hex2hash32(input_tx.transaction_hash),
                     'prev_tx_index': input_tx.transaction_index,
@@ -169,7 +169,7 @@ class BitcoinClickHouseLoader:
                 
                 output_data = {
                     'n_block': block.height,
-                    'transaction_hash': self._hex2hash32(transaction.hash),
+                    'transaction_hash': self._hex2hash32(transaction.txid),
                     'output_index': output_index,
                     'value': output_tx.value,
                     'script_hex': output_tx.script.hex,
