@@ -12,7 +12,8 @@ def bitcoin2clickhouse():
         clickhouse_port=int(os.getenv('CLICKHOUSE_PORT', '9000')),
         clickhouse_user=os.getenv('CLICKHOUSE_USER', 'default'),
         clickhouse_password=os.getenv('CLICKHOUSE_PASSWORD', ''),
-        database=os.getenv('CLICKHOUSE_DATABASE', 'bitcoin')
+        database=os.getenv('CLICKHOUSE_DATABASE', 'bitcoin'),
+        max_workers=int(os.getenv('MAX_WORKERS', '2'))
     )
 
 def test_load_first_100_blocks(bitcoin2clickhouse):

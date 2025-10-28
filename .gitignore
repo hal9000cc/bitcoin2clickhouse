@@ -1,3 +1,5 @@
+python-bitcoin-blockchain-parser/
+
 __pycache__/
 *.py[cod]
 *$py.class
