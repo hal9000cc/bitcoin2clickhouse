@@ -206,11 +206,31 @@ class BitcoinClickHouseLoader:
         
         return inputs_data, outputs_data, block_data
     
-    def _hex2hash32(self, hex_string):
+    @staticmethod
+    def _hex2hash32(hex_string):
         """Convert hex string to bytes for FixedString(32)"""
         if not hex_string:
             return b'\x00' * 32
         return bytes.fromhex(hex_string)
+    
+    @staticmethod
+    def _to_hex(value):
+        if value is None:
+            return ''
+        if hasattr(value, 'hex'):
+            try:
+                return value.hex()
+            except Exception:
+                pass
+        if isinstance(value, str):
+            try:
+                return value.encode('latin1').hex()
+            except Exception:
+                return value
+        try:
+            return bytes(value).hex()
+        except Exception:
+            return str(value)
     
     
     def _get_script_type(self, script):
@@ -585,16 +605,12 @@ class BitcoinClickHouseLoader:
         try:
             result = self.client.execute("""
                 SELECT DISTINCT ti.transaction_hash
-                FROM tran_in ti
-                WHERE ti.transaction_hash != '' 
-                AND NOT EXISTS (
-                    SELECT 1 FROM tran_out to 
-                    WHERE ti.transaction_hash = to.transaction_hash
-                )
+                FROM tran_in ti left join tran_out to
+                    ON ti.transaction_hash = to.transaction_hash AND to.transaction_hash = '' AND ti.transaction_hash != ''
                 LIMIT 100
             """)
             
-            missing_in_tran_out = [row[0] for row in result]
+            missing_in_tran_out = [self._to_hex(row[0]) for row in result]
             if missing_in_tran_out:
                 error = f"Error: Transactions in tran_in missing in tran_out (showing first 100): {missing_in_tran_out}"
                 errors.append(error)
@@ -602,16 +618,12 @@ class BitcoinClickHouseLoader:
             
             result = self.client.execute("""
                 SELECT DISTINCT to.transaction_hash
-                FROM tran_out to
-                WHERE to.transaction_hash != '' 
-                AND NOT EXISTS (
-                    SELECT 1 FROM tran_in ti 
-                    WHERE to.transaction_hash = ti.transaction_hash
-                )
+                FROM tran_out to LEFT JOIN tran_in ti
+                    ON to.transaction_hash = ti.transaction_hash AND ti.transaction_hash == '' AND to.transaction_hash = ''
                 LIMIT 100
             """)
             
-            missing_in_tran_in = [row[0] for row in result]
+            missing_in_tran_in = [self._to_hex(row[0]) for row in result]
             if missing_in_tran_in:
                 error = f"Error: Transactions in tran_out missing in tran_in (showing first 100): {missing_in_tran_in}"
                 errors.append(error)
@@ -630,48 +642,24 @@ class BitcoinClickHouseLoader:
     def _check_prev_tx_hash_consistency(self, check_number: int):
         """prev_tx_hash from tran_in matches transactions in tran_out. Returns list of errors."""
 
-        block_batch_size = 100000
-        max_display_errors = 10
-
         errors = []
         
         self.logger.info(f"Check {check_number}: prev_tx_hash from tran_in matches transactions in tran_out...")
         
         try:
+            result = self.client.execute("""
+                SELECT DISTINCT ti.prev_tx_hash, ti.transaction_hash, ti.input_index
+                FROM tran_in ti LEFT JOIN tran_out to
+                    ON ti.prev_tx_hash = to.transaction_hash AND to.transaction_hash = '' AND ti.prev_tx_hash != ''
+                LIMIT 100
+            """)
             
-            max_block_result = self.client.execute("SELECT MAX(n_block) FROM tran_in")
-            max_block = max_block_result[0][0] if max_block_result[0][0] is not None else 0
-            
-            processed_blocks = 0
-            batch_errors = []
-            
-            self.logger.info(f"Processing prev_tx_hash consistency check in batches up to block {max_block}...")
-            
-            while processed_blocks <= max_block and len(batch_errors) < max_display_errors:
-                result = self.client.execute("""
-                    SELECT DISTINCT ti.prev_tx_hash, ti.transaction_hash, ti.input_index
-                    FROM tran_in ti
-                    WHERE ti.prev_tx_hash != ''
-                    AND ti.n_block >= %(min_block)s AND ti.n_block < %(max_block)s
-                    AND NOT EXISTS (
-                        SELECT 1 FROM tran_out to 
-                        WHERE to.transaction_hash = ti.prev_tx_hash
-                    )
-                """, {
-                    'min_block': processed_blocks,
-                    'max_block': processed_blocks + block_batch_size
-                })
-                
-                if result:
-                    batch_errors.extend([f"{row[0].hex()} (in transaction {row[1].hex()}, input {row[2]})" for row in result])
-                
-                processed_blocks += block_batch_size
-                
-                self.logger.info(f"Processed blocks up to {processed_blocks}, found {len(batch_errors)} errors...")
-                
-            if batch_errors:
-                display_errors = batch_errors[:max_display_errors]
-                error = f"Error: prev_tx_hash from tran_in missing in tran_out (showing first {max_display_errors} of {len(batch_errors)}): {display_errors}"
+            if result:
+                display_errors = [
+                    f"{self._to_hex(row[0])} (in transaction {self._to_hex(row[1])}, input {row[2]})"
+                    for row in result
+                ]
+                error = f"Error: prev_tx_hash from tran_in missing in tran_out: {display_errors}"
                 errors.append(error)
                 self.logger.error(error)
             else:
@@ -692,11 +680,11 @@ class BitcoinClickHouseLoader:
         
         try:
             result = self.client.execute("""
-                SELECT b.n_block, b.transaction_count, COUNT(DISTINCT ti.transaction_hash) as actual_count
+                SELECT b.n_block, MIN(b.transaction_count), COUNT(DISTINCT ti.transaction_hash) as actual_count
                 FROM blocks b
                 LEFT JOIN tran_in ti ON b.n_block = ti.n_block
-                GROUP BY b.n_block, b.transaction_count
-                HAVING b.transaction_count != actual_count
+                GROUP BY b.n_block
+                HAVING MIN(b.transaction_count) != actual_count
             """)
             
             inconsistent_counts = [f"Block {row[0]}: declared {row[1]} transactions, actual {row[2]}" for row in result]
