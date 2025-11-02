@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import traceback
 # from blockchain_parser.blockchain import get_blocks
 # from blockchain_parser.block import Block
-from src.bitcoin2clickhouse import BitcoinClickHouseLoader
+from bitcoin2clickhouse import BitcoinClickHouseLoader
 
 def format_error_with_location(error, context=""):
     """Format error with file and line number information"""
@@ -184,6 +184,13 @@ class Bitcoin2ClickHouseDaemon:
         if not self._initialize_loader():
             return 1
         
+        try:
+            self.logger.info("Processing pending blocks before monitoring...")
+            self.loader.update_all()
+            self.logger.info("Pending blocks processed")
+        except Exception as e:
+            self.logger.error(format_error_with_location(e, "Error processing pending blocks: "))
+        
         self.logger.info("Daemon started. Monitoring for new blocks...")
         self.logger.info("Press Ctrl+C to stop")
         
@@ -200,11 +207,11 @@ class Bitcoin2ClickHouseDaemon:
                     continue
                 
                 if last_filename != current_filename or last_mtime != current_mtime:
-                    last_filename = current_filename
-                    last_mtime = current_mtime
                     
                     try:
                         self.load_new_blocks(self.bitcoin_blocks_dir, self.xor_dat_path)
+                        last_filename = current_filename
+                        last_mtime = current_mtime
                     except Exception as e:
                         self.logger.error(format_error_with_location(e, "Error in load_new_blocks: "))
                 

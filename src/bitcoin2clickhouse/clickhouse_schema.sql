@@ -119,6 +119,19 @@ SELECT
     created_at
 FROM tran_out;
 
+CREATE TABLE blocks_mod
+(
+    n_block UInt32
+)
+ENGINE = MergeTree()
+ORDER BY n_block
+SETTINGS index_granularity = 8192;
+
+CREATE MATERIALIZED VIEW blocks_mod_mv TO blocks_mod
+AS
+SELECT n_block
+FROM blocks;
+
 CREATE TABLE turnover
 (
     time DateTime,
@@ -130,30 +143,14 @@ ENGINE = MergeTree()
 ORDER BY (time, tx_id, address)
 SETTINGS index_granularity = 8192;
 
-CREATE MATERIALIZED VIEW adr_in TO turnover
-AS
-SELECT 
-    b.block_timestamp as time,
-    to.tx_id as tx_id,
-    to.addresses[1] as address,
-    sum(to.value / 100000000.0) as value 
-FROM blocks b
-JOIN (SELECT * FROM tran_out WHERE n_block in (SELECT n_block FROM blocks)) to ON to.n_block = b.n_block
-WHERE to.address_count > 0
-GROUP BY time, tx_id, address;
-
-CREATE MATERIALIZED VIEW adr_out TO turnover
-AS
-SELECT 
-    b.block_timestamp as time,
-    ti.tx_id as tx_id,
-    to.addresses[1] as address,
-    -sum(to.value / 100000000.0) as value  
-FROM blocks b
-JOIN (SELECT * FROM tran_in WHERE n_block in (SELECT n_block FROM blocks)) ti ON ti.n_block = b.n_block
-JOIN (SELECT * FROM tran_out WHERE n_block in (SELECT n_block FROM blocks)) to ON 
-    ti.prev_tx_hash = to.tx_id 
-    AND ti.input_index = to.output_index 
-    AND to.address_count > 0
-GROUP BY time, tx_id, address;
+CREATE TABLE turnover_m
+(
+    time_month Date,
+    address String,
+    value Float64,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (time_month, address)
+SETTINGS index_granularity = 8192;
 
