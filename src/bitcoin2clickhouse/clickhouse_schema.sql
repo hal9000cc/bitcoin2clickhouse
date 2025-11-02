@@ -12,12 +12,12 @@ CREATE TABLE blocks (
     transaction_count UInt32,
     processed_at DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(processed_at)
-ORDER BY (n_block, block_hash)
+ORDER BY (n_block)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE tran_in (
     n_block UInt32 CODEC(Delta, LZ4),
-    transaction_hash FixedString(32),
+    tx_id FixedString(32),
     input_index UInt16,
     prev_tx_hash FixedString(32),
     prev_tx_index UInt32,
@@ -30,12 +30,12 @@ CREATE TABLE tran_in (
     input_size UInt16,
     is_coinbase UInt8
 ) ENGINE = ReplacingMergeTree()
-ORDER BY (n_block, transaction_hash, input_index)
+ORDER BY (n_block, tx_id, input_index)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE tran_out (
     n_block UInt32 CODEC(Delta, LZ4),
-    transaction_hash FixedString(32),
+    tx_id FixedString(32),
     output_index UInt32,
     value UInt64 CODEC(Delta, LZ4),
     script_hex String,
@@ -53,7 +53,7 @@ CREATE TABLE tran_out (
     address_types Array(LowCardinality(String)),
     created_at DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(created_at)
-ORDER BY (n_block, transaction_hash, output_index)
+ORDER BY (n_block, tx_id, output_index)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE db_version (
@@ -83,7 +83,7 @@ FROM blocks;
 CREATE VIEW tran_in_h AS
 SELECT 
     n_block,
-    hex(transaction_hash) as transaction_hash_h,
+    hex(tx_id) as tx_id_h,
     input_index,
     hex(prev_tx_hash) as prev_tx_hash_h,
     prev_tx_index,
@@ -100,7 +100,7 @@ FROM tran_in;
 CREATE VIEW tran_out_h AS
 SELECT 
     n_block,
-    hex(transaction_hash) as transaction_hash_h,
+    hex(tx_id) as tx_id_h,
     output_index,
     value,
     script_hex,
@@ -119,27 +119,41 @@ SELECT
     created_at
 FROM tran_out;
 
-CREATE TABLE bitcoin.tran_out1
+CREATE TABLE turnover
 (
-    `n_block` UInt32 CODEC(Delta(4), LZ4),
-    `transaction_hash` FixedString(32),
-    `output_index` UInt32,
-    `value` UInt64 CODEC(Delta(8), LZ4),
-    `script_hex` String,
-    `script_type` LowCardinality(String),
-    `is_p2pkh` UInt8,
-    `is_p2sh` UInt8,
-    `is_p2wpkh` UInt8,
-    `is_p2wsh` UInt8,
-    `is_p2tr` UInt8,
-    `is_multisig` UInt8,
-    `is_unknown` UInt8,
-    `is_op_return` UInt8,
-    `address_count` UInt16,
-    `addresses` Array(String),
-    `address_types` Array(LowCardinality(String)),
-    `created_at` DateTime DEFAULT now()
+    time DateTime,
+    tx_id FixedString(32),
+    address String,
+    value Float64
 )
-ENGINE = ReplacingMergeTree(created_at)
-ORDER BY (transaction_hash, output_index)
-SETTINGS index_granularity = 8192
+ENGINE = MergeTree()
+ORDER BY (time, tx_id, address)
+SETTINGS index_granularity = 8192;
+
+CREATE MATERIALIZED VIEW adr_in TO turnover
+AS
+SELECT 
+    b.block_timestamp as time,
+    to.tx_id as tx_id,
+    to.addresses[1] as address,
+    sum(to.value / 100000000.0) as value 
+FROM blocks b
+JOIN (SELECT * FROM tran_out WHERE n_block in (SELECT n_block FROM blocks)) to ON to.n_block = b.n_block
+WHERE to.address_count > 0
+GROUP BY time, tx_id, address;
+
+CREATE MATERIALIZED VIEW adr_out TO turnover
+AS
+SELECT 
+    b.block_timestamp as time,
+    ti.tx_id as tx_id,
+    to.addresses[1] as address,
+    -sum(to.value / 100000000.0) as value  
+FROM blocks b
+JOIN (SELECT * FROM tran_in WHERE n_block in (SELECT n_block FROM blocks)) ti ON ti.n_block = b.n_block
+JOIN (SELECT * FROM tran_out WHERE n_block in (SELECT n_block FROM blocks)) to ON 
+    ti.prev_tx_hash = to.tx_id 
+    AND ti.input_index = to.output_index 
+    AND to.address_count > 0
+GROUP BY time, tx_id, address;
+

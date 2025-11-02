@@ -1,10 +1,13 @@
 import sys
 import os
 import logging
+import glob
 from datetime import datetime
 from clickhouse_driver import Client
 from clickhouse_driver.writer import MAX_INT64
 from blockchain_parser.blockchain import Blockchain
+from blockchain_parser.blockchain import get_block, get_blocks
+from blockchain_parser.block import Block
 
 def format_error_with_location(error, context=""):
     """Format error with file and line number information"""
@@ -72,7 +75,7 @@ class BitcoinClickHouseLoader:
                 password=self.clickhouse_password,
                 database=self.database
             )
-            self.logger.info(f"Connected to database {self.database}")
+            self.logger.debug(f"Connected to database {self.database}")
             
             self.database_initialize(client)
             
@@ -148,7 +151,7 @@ class BitcoinClickHouseLoader:
             for input_index, input_tx in enumerate(transaction.inputs):
                 input_data = {
                     'n_block': block.height,
-                    'transaction_hash': self._hex2hash32(transaction.txid),
+                    'tx_id': self._hex2hash32(transaction.txid),
                     'input_index': input_index,
                     'prev_tx_hash': self._hex2hash32(input_tx.transaction_hash),
                     'prev_tx_index': input_tx.transaction_index,
@@ -169,7 +172,7 @@ class BitcoinClickHouseLoader:
                 
                 output_data = {
                     'n_block': block.height,
-                    'transaction_hash': self._hex2hash32(transaction.txid),
+                    'tx_id': self._hex2hash32(transaction.txid),
                     'output_index': output_index,
                     'value': output_tx.value,
                     'script_hex': output_tx.script.hex,
@@ -276,21 +279,22 @@ class BitcoinClickHouseLoader:
                 'INSERT INTO tran_in VALUES',
                 inputs_data
             )
-            self.logger.info(f"Inserted {len(inputs_data)} inputs")
+            self.logger.debug(f"Inserted {len(inputs_data)} inputs")
         
         if outputs_data:
             self.client.execute(
                 'INSERT INTO tran_out VALUES',
                 outputs_data
             )
-            self.logger.info(f"Inserted {len(outputs_data)} outputs")
+            self.logger.debug(f"Inserted {len(outputs_data)} outputs")
         
         if blocks_data:
             self.client.execute(
                 'INSERT INTO blocks VALUES',
                 blocks_data
             )
-            self.logger.info(f"Inserted {len(blocks_data)} blocks")
+            block_info = [(block['n_block'], block['block_timestamp'].strftime('%Y-%m-%d %H:%M:%S')) for block in blocks_data]
+            self.logger.info(f"Inserted {len(blocks_data)} blocks: {block_info}")
     
     
     def last_stored_block(self):
@@ -364,11 +368,11 @@ class BitcoinClickHouseLoader:
         last_stored = self.last_stored_block()
         if last_stored >= 0:
             actual_start = last_stored + 1
-            self.logger.info(f"Last stored block: {last_stored}")
+            self.logger.debug(f"Last stored block: {last_stored}")
         else:
             actual_start = 0
             
-        self.logger.info(f"Loading new blocks from {actual_start}")
+        self.logger.debug(f"Loading new blocks from {actual_start}")
         
         self.load(blockchain_path, xor_dat_path, actual_start, None, batch_size, cache_file)
     
@@ -378,7 +382,7 @@ class BitcoinClickHouseLoader:
         last_loaded = self.last_stored_block()
         start_height = last_loaded + 1 if last_loaded >= 0 else 0
         
-        self.logger.info(f"Getting unloaded blocks from height {start_height}")
+        self.logger.debug(f"Getting unloaded blocks from height {start_height}")
         
         if xor_dat_path:
             blockchain = Blockchain(blockchain_path, xor_dat_path)
@@ -507,8 +511,7 @@ class BitcoinClickHouseLoader:
             result = self.client.execute("""
                 SELECT DISTINCT ti.n_block
                 FROM tran_in ti
-                LEFT JOIN blocks b ON ti.n_block = b.n_block
-                WHERE b.n_block = 0 AND b.block_hash = ''
+                LEFT ANTI JOIN blocks b ON ti.n_block = b.n_block
             """)
             
             missing_in_blocks_from_tran_in = [row[0] for row in result]
@@ -520,8 +523,7 @@ class BitcoinClickHouseLoader:
             result = self.client.execute("""
                 SELECT DISTINCT b.n_block
                 FROM blocks b
-                LEFT JOIN tran_in ti ON b.n_block = ti.n_block
-                WHERE ti.n_block = 0 AND ti.transaction_hash = ''
+                LEFT ANTI JOIN tran_in ti ON b.n_block = ti.n_block
             """)
             
             missing_in_tran_in_from_blocks = [row[0] for row in result]
@@ -533,8 +535,7 @@ class BitcoinClickHouseLoader:
             result = self.client.execute("""
                 SELECT DISTINCT to.n_block
                 FROM tran_out to
-                LEFT JOIN blocks b ON to.n_block = b.n_block
-                WHERE b.n_block = 0 AND b.block_hash = ''
+                LEFT ANTI JOIN blocks b ON to.n_block = b.n_block
             """)
             
             missing_in_blocks_from_tran_out = [row[0] for row in result]
@@ -546,8 +547,7 @@ class BitcoinClickHouseLoader:
             result = self.client.execute("""
                 SELECT DISTINCT b.n_block
                 FROM blocks b
-                LEFT JOIN tran_out to ON b.n_block = to.n_block
-                WHERE to.n_block = 0 AND to.transaction_hash = ''
+                LEFT ANTI JOIN tran_out to ON b.n_block = to.n_block
             """)
             
             missing_in_tran_out_from_blocks = [row[0] for row in result]
@@ -576,7 +576,7 @@ class BitcoinClickHouseLoader:
             result = self.client.execute("""
                 SELECT b1.n_block, b1.block_hash, b1.prev_block_hash, b2.block_hash as prev_hash
                 FROM blocks b1
-                LEFT JOIN blocks b2 ON b1.prev_block_hash = b2.block_hash
+                LEFT JOIN blocks b2 ON b1.prev_block_hash = b2.block_hash AND b1.n_block = b2.n_block + 1
                 WHERE b1.n_block > 0 AND b2.block_hash = ''
             """)
             
@@ -599,33 +599,75 @@ class BitcoinClickHouseLoader:
     def _check_transaction_hash_consistency(self, check_number: int):
         """transaction_hash consistency between tran_in and tran_out. Returns list of errors."""
         errors = []
+        block_batch_size = 100000
+        max_display_errors = 100
         
         self.logger.info(f"Check {check_number}: transaction_hash consistency between tran_in and tran_out...")
         
         try:
-            result = self.client.execute("""
-                SELECT DISTINCT ti.transaction_hash
-                FROM tran_in ti left join tran_out to
-                    ON ti.transaction_hash = to.transaction_hash AND to.transaction_hash = '' AND ti.transaction_hash != ''
-                LIMIT 100
-            """)
+            max_block_result = self.client.execute("SELECT MAX(n_block) FROM tran_in")
+            max_block = max_block_result[0][0] if max_block_result[0][0] is not None else 0
             
-            missing_in_tran_out = [self._to_hex(row[0]) for row in result]
+            missing_in_tran_out = []
+            missing_in_tran_in = []
+            
+            start_block = 0
+            while start_block <= max_block:
+                end_block = min(start_block + block_batch_size, max_block + 1)
+                
+                result = self.client.execute("""
+                    SELECT DISTINCT hex(ti.tx_id) as tx_hash
+                    FROM tran_in ti 
+                    LEFT ANTI JOIN tran_out to
+                        ON ti.n_block = to.n_block 
+                        AND ti.tx_id = to.tx_id 
+                        AND ti.tx_id != ''
+                    WHERE ti.n_block >= %(start_block)s AND ti.n_block < %(end_block)s
+                    LIMIT %(max_errors)s
+                """, {
+                    'start_block': start_block,
+                    'end_block': end_block,
+                    'max_errors': max_display_errors - len(missing_in_tran_out)
+                })
+                
+                if result:
+                    missing_in_tran_out.extend([row[0] for row in result])
+                
+                if len(missing_in_tran_out) >= max_display_errors:
+                    break
+                
+                result = self.client.execute("""
+                    SELECT DISTINCT hex(to.tx_id) as tx_hash
+                    FROM tran_out to 
+                    LEFT ANTI JOIN tran_in ti
+                        ON to.n_block = ti.n_block 
+                        AND to.tx_id = ti.tx_id 
+                        AND to.tx_id != ''
+                    WHERE to.n_block >= %(start_block)s AND to.n_block < %(end_block)s
+                    LIMIT %(max_errors)s
+                """, {
+                    'start_block': start_block,
+                    'end_block': end_block,
+                    'max_errors': max_display_errors - len(missing_in_tran_in)
+                })
+                
+                if result:
+                    missing_in_tran_in.extend([row[0] for row in result])
+                
+                if len(missing_in_tran_in) >= max_display_errors:
+                    break
+                
+                self.logger.info(f"Processed blocks {start_block} to {end_block - 1}, found {len(missing_in_tran_out)} missing in tran_out, {len(missing_in_tran_in)} missing in tran_in...")
+                
+                start_block = end_block
+            
             if missing_in_tran_out:
-                error = f"Error: Transactions in tran_in missing in tran_out (showing first 100): {missing_in_tran_out}"
+                error = f"Error: Transactions in tran_in missing in tran_out (showing first {len(missing_in_tran_out)}): {missing_in_tran_out[:max_display_errors]}"
                 errors.append(error)
                 self.logger.error(error)
             
-            result = self.client.execute("""
-                SELECT DISTINCT to.transaction_hash
-                FROM tran_out to LEFT JOIN tran_in ti
-                    ON to.transaction_hash = ti.transaction_hash AND ti.transaction_hash == '' AND to.transaction_hash = ''
-                LIMIT 100
-            """)
-            
-            missing_in_tran_in = [self._to_hex(row[0]) for row in result]
             if missing_in_tran_in:
-                error = f"Error: Transactions in tran_out missing in tran_in (showing first 100): {missing_in_tran_in}"
+                error = f"Error: Transactions in tran_out missing in tran_in (showing first {len(missing_in_tran_in)}): {missing_in_tran_in[:max_display_errors]}"
                 errors.append(error)
                 self.logger.error(error)
             
@@ -648,10 +690,14 @@ class BitcoinClickHouseLoader:
         
         try:
             result = self.client.execute("""
-                SELECT DISTINCT ti.prev_tx_hash, ti.transaction_hash, ti.input_index
-                FROM tran_in ti LEFT JOIN tran_out to
-                    ON ti.prev_tx_hash = to.transaction_hash AND to.transaction_hash = '' AND ti.prev_tx_hash != ''
+                SELECT ti.prev_tx_hash, ti.tx_id, ti.input_index
+                FROM tran_in ti LEFT ANTI JOIN tran_out to
+                    ON ti.prev_tx_hash = to.tx_id
+                WHERE ti.prev_tx_hash != ''
                 LIMIT 100
+                SETTINGS
+                    join_algorithm = 'grace_hash',
+                    grace_hash_join_initial_buckets = 8
             """)
             
             if result:
@@ -680,20 +726,36 @@ class BitcoinClickHouseLoader:
         
         try:
             result = self.client.execute("""
-                SELECT b.n_block, MIN(b.transaction_count), COUNT(DISTINCT ti.transaction_hash) as actual_count
+                SELECT b.n_block, MIN(b.transaction_count), COUNT(DISTINCT ti.tx_id) as actual_count
                 FROM blocks b
                 LEFT JOIN tran_in ti ON b.n_block = ti.n_block
                 GROUP BY b.n_block
                 HAVING MIN(b.transaction_count) != actual_count
             """)
             
-            inconsistent_counts = [f"Block {row[0]}: declared {row[1]} transactions, actual {row[2]}" for row in result]
+            inconsistent_counts_in = [f"Block {row[0]}: declared {row[1]} transactions, actual in tran_in {row[2]}" for row in result]
             
-            if inconsistent_counts:
-                error = f"Error: transaction_count inconsistency: {inconsistent_counts}"
+            if inconsistent_counts_in:
+                error = f"Error: transaction_count inconsistency in tran_in: {inconsistent_counts_in}"
                 errors.append(error)
                 self.logger.error(error)
-            else:
+            
+            result = self.client.execute("""
+                SELECT b.n_block, MIN(b.transaction_count), COUNT(DISTINCT to.tx_id) as actual_count
+                FROM blocks b
+                LEFT JOIN tran_out to ON b.n_block = to.n_block
+                GROUP BY b.n_block
+                HAVING MIN(b.transaction_count) != actual_count
+            """)
+            
+            inconsistent_counts_out = [f"Block {row[0]}: declared {row[1]} transactions, actual in tran_out {row[2]}" for row in result]
+            
+            if inconsistent_counts_out:
+                error = f"Error: transaction_count inconsistency in tran_out: {inconsistent_counts_out}"
+                errors.append(error)
+                self.logger.error(error)
+            
+            if not inconsistent_counts_in and not inconsistent_counts_out:
                 self.logger.info("✓ transaction_count consistency is correct")
         
         except Exception as e:
@@ -743,7 +805,142 @@ class BitcoinClickHouseLoader:
         
         return errors
     
+    @staticmethod
+    def load_blocks_worker(blockchain_path, xor_dat_path, block_indexes, batch_size, worker_id, cache_file, clickhouse_host=None, clickhouse_port=None, clickhouse_user=None, clickhouse_password=None, database=None):
+        """Worker process for loading blocks"""
+        try:
+            
+            logger = logging.getLogger(f'worker_{worker_id}')
+            if not logger.handlers:
+                formatter = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                )
+                
+                os.makedirs('logs', exist_ok=True)
+                file_handler = logging.FileHandler(os.path.join('logs', f'bitcoin2clickhouse_worker_{worker_id}.log'))
+                file_handler.setLevel(logging.INFO)
+                file_handler.setFormatter(formatter)
+                
+                console_handler = logging.StreamHandler()
+                console_handler.setLevel(logging.INFO)
+                console_handler.setFormatter(formatter)
+                
+                logger.setLevel(logging.INFO)
+                logger.addHandler(file_handler)
+                logger.addHandler(console_handler)
+            
+            worker_loader = BitcoinClickHouseLoader(
+                clickhouse_host=clickhouse_host,
+                clickhouse_port=clickhouse_port,
+                clickhouse_user=clickhouse_user,
+                clickhouse_password=clickhouse_password,
+                database=database
+            )
+            
+            logger.debug(f"Worker {worker_id}: Loading {len(block_indexes)} blocks")
+            
+            xor_key = None
+            if xor_dat_path:
+                with open(xor_dat_path, 'rb') as f:
+                    xor_key = f.read()
 
-
-
+            inputs_batch = []
+            outputs_batch = []
+            blocks_batch = []
+                    
+            for block_idx in block_indexes:
+                try:
+                    blkFile = os.path.join(blockchain_path, f"blk{block_idx.file:05d}.dat")
+                    raw_block = get_block(blkFile, block_idx.data_pos, xor_key)
+                    block = Block(raw_block, block_idx.height)
+                    
+                    inputs_data, outputs_data, blocks_data = worker_loader.parse_block(block)
+                    
+                    if inputs_data is not None:
+                        inputs_batch.extend(inputs_data)
+                        outputs_batch.extend(outputs_data)
+                        blocks_batch.append(blocks_data)
+                        
+                        if len(inputs_batch) >= batch_size or len(outputs_batch) >= batch_size:
+                            worker_loader.insert_data(inputs_batch, outputs_batch, blocks_batch)
+                            inputs_batch = []
+                            outputs_batch = []
+                            blocks_batch = []
+                        
+                except Exception as e:
+                    logger.error(format_error_with_location(e, f"Worker {worker_id}: Error processing block {block_idx.height}: "))
+                    raise e
+            
+            if inputs_batch or outputs_batch or blocks_batch:
+                worker_loader.insert_data(inputs_batch, outputs_batch, blocks_batch)
+            
+            return f"Worker {worker_id}: Successfully loaded {len(block_indexes)} blocks"
+            
+        except Exception as e:
+            return f"Worker {worker_id}: Failed with error: {e}"
+    
+    def daemon_find_stored_blocks(self, blockfile_path, xor_key=None):
+        try:
+            block_hashes = []
+            for block_raw in get_blocks(blockfile_path, xor_key):
+                block = Block(block_raw, None)
+                block_hash = self._hex2hash32(block.hash)
+                block_hashes.append(block_hash)
+            
+            if not block_hashes:
+                return []
+            
+            stored_hashes = []
+            batch_size = 1000
+            for i in range(0, len(block_hashes), batch_size):
+                batch = block_hashes[i:i + batch_size]
+                if len(batch) == 1:
+                    query = f"SELECT block_hash FROM blocks WHERE block_hash = %(hash)s"
+                    result = self.client.execute(query, {'hash': batch[0]})
+                else:
+                    hash_list = ','.join([f"unhex('{hash_bytes.hex()}')" for hash_bytes in batch])
+                    query = f"SELECT block_hash FROM blocks WHERE block_hash IN ({hash_list})"
+                    result = self.client.execute(query)
+                stored_hashes.extend([row[0] for row in result])
+            
+            return stored_hashes
+            
+        except Exception as e:
+            self.logger.error(format_error_with_location(e, f"Error in daemon_find_stored_blocks: "))
+            return []
+    
+    def daemon_set_block_height(self, block):
+        
+        prev_block_hash = self._hex2hash32(block.header.previous_block_hash)
+        if prev_block_hash == b'\x00' * 32:
+            block.height = 0
+            return
+        
+        query = f"SELECT n_block FROM blocks WHERE block_hash = unhex('{prev_block_hash.hex()}') LIMIT 1"
+        result = self.client.execute(query)
+        
+        assert len(result) > 0, f"Block {block.hash} not found in blocks table"
+        assert len(result) == 1, f"Multiple blocks found for hash {block.hash}"
+        block.height = result[0][0] + 1
+    
+    def daemon_load_new_blocks_from_file(self, blockfile_path, stored_hashes, xor_key=None):
+        try:
+            stored_hashes_set = set(stored_hashes)
+            
+            for block_raw in get_blocks(blockfile_path, xor_key):
+                block = Block(block_raw, None)
+                block_hash = self._hex2hash32(block.hash)
+                
+                if block_hash not in stored_hashes_set:
+                    self.daemon_set_block_height(block)
+                    inputs_data, outputs_data, blocks_data = self.parse_block(block)
+                    
+                    if inputs_data is not None:
+                        self.insert_data(inputs_data, outputs_data, [blocks_data])
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(format_error_with_location(e, f"Error in daemon_load_new_blocks_from_file: "))
+            raise e
 
