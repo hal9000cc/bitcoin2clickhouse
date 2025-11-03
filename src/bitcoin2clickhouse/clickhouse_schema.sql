@@ -121,15 +121,20 @@ FROM tran_out;
 
 CREATE TABLE blocks_mod
 (
-    n_block UInt32
+    n_block UInt32,
+    modified UInt8,
+    updated_at DateTime DEFAULT now()
 )
-ENGINE = MergeTree()
+ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY n_block
 SETTINGS index_granularity = 8192;
 
 CREATE MATERIALIZED VIEW blocks_mod_mv TO blocks_mod
 AS
-SELECT n_block
+SELECT 
+    n_block,
+    1 AS modified,
+    now() AS updated_at
 FROM blocks;
 
 CREATE TABLE turnover
@@ -139,7 +144,7 @@ CREATE TABLE turnover
     address String,
     value Float64
 )
-ENGINE = MergeTree()
+ENGINE = ReplacingMergeTree()
 ORDER BY (time, tx_id, address)
 SETTINGS index_granularity = 8192;
 
@@ -151,6 +156,19 @@ CREATE TABLE turnover_m
     updated_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY toYYYYMM(time_month)
 ORDER BY (time_month, address)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE turnover_y
+(
+    time_year Date,
+    address String,
+    value Float64,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY toYYYY(time_year)
+ORDER BY (time_year, address)
 SETTINGS index_granularity = 8192;
 

@@ -41,6 +41,10 @@ class BitcoinClickHouseLoader:
         self.update_batch_size = update_batch_size
         
         self.client = self.database_connect()
+        self.stop_requested = False
+
+    def request_stop(self):
+        self.stop_requested = True
     
     def _setup_logging(self):
         if not self.logger.handlers:
@@ -277,7 +281,7 @@ class BitcoinClickHouseLoader:
         else:
             return 'unknown'
     
-    def insert_data(self, inputs_data, outputs_data, blocks_data):
+    def insert_data(self, inputs_data, outputs_data, blocks_data, update_stats=True):
 
         if inputs_data:
             self.client.execute(
@@ -300,19 +304,23 @@ class BitcoinClickHouseLoader:
             )
             block_info = [(block['n_block'], block['block_timestamp'].strftime('%Y-%m-%d %H:%M:%S')) for block in blocks_data]
             self.logger.info(f"Inserted {len(blocks_data)} blocks: {block_info}")
-            self.update_all()
+            if update_stats:
+                self.update_all()
     
     def update_all(self):
         try:
-            initial_result = self.client.execute("SELECT count() FROM blocks_mod")
+            initial_result = self.client.execute("SELECT count() FROM blocks_mod FINAL WHERE modified = 1")
             remaining_count = initial_result[0][0] if initial_result else 0
             
             if remaining_count == 0:
                 return
             
             while True:
+                if self.stop_requested:
+                    self.logger.info("Stop requested, exiting update_all loop")
+                    break
                 result = self.client.execute(
-                    f"SELECT n_block FROM blocks_mod ORDER BY n_block LIMIT {self.update_batch_size}"
+                    f"SELECT n_block FROM blocks_mod FINAL WHERE modified = 1 ORDER BY n_block LIMIT {self.update_batch_size}"
                 )
                 if not result or len(result) == 0:
                     break
@@ -322,13 +330,16 @@ class BitcoinClickHouseLoader:
                 
                 self.update_turnover(block_numbers)
                 self.update_turnover_m(block_numbers)
+                self.update_turnover_y(block_numbers)
                 
+                # reset modified flag by inserting new versions
                 block_numbers_str = ','.join(map(str, block_numbers))
-                self.client.execute(f"DELETE FROM blocks_mod WHERE n_block IN ({block_numbers_str})")
+                values = [(nb, 0) for nb in block_numbers]
+                self.client.execute('INSERT INTO blocks_mod (n_block, modified) VALUES', values)
                 
                 remaining_count -= len(block_numbers)
                 
-                self.logger.info(f"Processed and deleted {len(block_numbers)} blocks from blocks_mod, {remaining_count} remaining")
+                self.logger.info(f"Processed and reset {len(block_numbers)} blocks in blocks_mod, {remaining_count} remaining")
         except KeyboardInterrupt:
             self.logger.info("Update interrupted by user (Ctrl+C)")
             raise
@@ -349,8 +360,8 @@ class BitcoinClickHouseLoader:
                     to.tx_id as tx_id,
                     to.addresses[1] as address,
                     sum(to.value / 100000000.0) as value 
-                FROM blocks b
-                JOIN tran_out to ON to.n_block = b.n_block
+                FROM blocks b FINAL
+                JOIN tran_out to FINAL ON to.n_block = b.n_block
                 WHERE b.n_block IN ({block_numbers_str})
                   AND to.address_count > 0
                 GROUP BY time, tx_id, address
@@ -360,7 +371,7 @@ class BitcoinClickHouseLoader:
                 INSERT INTO turnover (time, tx_id, address, value)
                     WITH needed_tx_ids AS (
                         SELECT DISTINCT prev_tx_hash
-                        FROM tran_in 
+                        FROM tran_in
                         WHERE n_block IN ({block_numbers_str})
                     )
                     SELECT 
@@ -368,9 +379,9 @@ class BitcoinClickHouseLoader:
                         ti.tx_id as tx_id,
                         to.addresses[1] as address,
                         -sum(to.value / 100000000.0) as value  
-                    FROM blocks b
-                    JOIN tran_in ti ON ti.n_block = b.n_block
-                    JOIN tran_out to ON 
+                    FROM blocks b FINAL
+                    JOIN tran_in ti FINAL ON ti.n_block = b.n_block
+                    JOIN tran_out to FINAL ON 
                         ti.prev_tx_hash = to.tx_id 
                         AND ti.input_index = to.output_index 
                         AND to.address_count > 0
@@ -397,7 +408,7 @@ class BitcoinClickHouseLoader:
                     address,
                     sum(value) as value,
                     now() as updated_at
-                FROM turnover
+                FROM turnover FINAL
                 WHERE toStartOfMonth(time) >= (
                     SELECT toStartOfMonth(min(block_timestamp)) 
                     FROM blocks 
@@ -414,6 +425,38 @@ class BitcoinClickHouseLoader:
             self.logger.debug(f"Updated turnover_m for {len(block_numbers)} blocks")
         except Exception as e:
             self.logger.error(format_error_with_location(e, f"Error in update_turnover_m: "))
+    
+    def update_turnover_y(self, block_numbers):
+        try:
+            if not block_numbers:
+                return
+            
+            block_numbers_str = ','.join(map(str, block_numbers))
+            
+            self.client.execute(f"""
+                INSERT INTO turnover_y (time_year, address, value, updated_at)
+                SELECT 
+                    toStartOfYear(time_month) as time_year,
+                    address,
+                    sum(value) as value,
+                    now() as updated_at
+                FROM turnover_m FINAL
+                WHERE toStartOfYear(time_month) >= (
+                    SELECT toStartOfYear(toStartOfMonth(min(block_timestamp))) 
+                    FROM blocks 
+                    WHERE n_block IN ({block_numbers_str})
+                )
+                  AND toStartOfYear(time_month) < (
+                    SELECT toStartOfYear(toStartOfMonth(max(block_timestamp))) + INTERVAL 1 YEAR 
+                    FROM blocks 
+                    WHERE n_block IN ({block_numbers_str})
+                  )
+                GROUP BY time_year, address
+            """)
+            
+            self.logger.debug(f"Updated turnover_y for {len(block_numbers)} blocks")
+        except Exception as e:
+            self.logger.error(format_error_with_location(e, f"Error in update_turnover_y: "))
     
     def last_stored_block(self):
 
@@ -980,7 +1023,7 @@ class BitcoinClickHouseLoader:
                         blocks_batch.append(blocks_data)
                         
                         if len(inputs_batch) >= batch_size or len(outputs_batch) >= batch_size:
-                            worker_loader.insert_data(inputs_batch, outputs_batch, blocks_batch)
+                            worker_loader.insert_data(inputs_batch, outputs_batch, blocks_batch, update_stats=False)
                             inputs_batch = []
                             outputs_batch = []
                             blocks_batch = []
@@ -990,7 +1033,7 @@ class BitcoinClickHouseLoader:
                     raise e
             
             if inputs_batch or outputs_batch or blocks_batch:
-                worker_loader.insert_data(inputs_batch, outputs_batch, blocks_batch)
+                worker_loader.insert_data(inputs_batch, outputs_batch, blocks_batch, update_stats=False)
             
             return f"Worker {worker_id}: Successfully loaded {len(block_indexes)} blocks"
             

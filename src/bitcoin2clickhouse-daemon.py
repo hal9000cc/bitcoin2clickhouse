@@ -89,6 +89,11 @@ class Bitcoin2ClickHouseDaemon:
     
     def _signal_handler(self, signum, frame):
         self.logger.info(f"Received signal {signum}. Shutting down gracefully...")
+        if self.loader:
+            try:
+                self.loader.request_stop()
+            except Exception:
+                pass
         self.running = False
     
     def _validate_environment(self):
