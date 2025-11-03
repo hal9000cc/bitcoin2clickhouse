@@ -156,6 +156,8 @@ class Bitcoin2ClickHouseDaemon:
             if start_index is None:
                 self.logger.error(f"Start file {start_file} not found in sorted list")
                 return False
+
+            if start_index > 0: start_index -= 1
             
             self.loader.daemon_load_new_blocks_from_file(start_file, stored_hashes, xor_key)
             
