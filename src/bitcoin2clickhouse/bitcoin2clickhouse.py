@@ -1012,13 +1012,9 @@ class BitcoinClickHouseLoader:
             batch_size = 1000
             for i in range(0, len(block_hashes), batch_size):
                 batch = block_hashes[i:i + batch_size]
-                if len(batch) == 1:
-                    query = f"SELECT block_hash FROM blocks WHERE block_hash = %(hash)s"
-                    result = self.client.execute(query, {'hash': batch[0]})
-                else:
-                    hash_list = ','.join([f"unhex('{hash_bytes.hex()}')" for hash_bytes in batch])
-                    query = f"SELECT block_hash FROM blocks WHERE block_hash IN ({hash_list})"
-                    result = self.client.execute(query)
+                hash_list = ','.join([f"unhex('{hash_bytes.hex()}')" for hash_bytes in batch])
+                query = f"SELECT block_hash FROM blocks WHERE block_hash IN ({hash_list})"
+                result = self.client.execute(query)
                 stored_hashes.extend([row[0] for row in result])
             
             return stored_hashes
@@ -1027,7 +1023,7 @@ class BitcoinClickHouseLoader:
             self.logger.error(format_error_with_location(e, f"Error in daemon_find_stored_blocks: "))
             return []
     
-    def daemon_set_block_height(self, block):
+    def block_height(self, block):
         
         prev_block_hash = self._hex2hash32(block.header.previous_block_hash)
         if prev_block_hash == b'\x00' * 32:
@@ -1037,25 +1033,42 @@ class BitcoinClickHouseLoader:
         query = f"SELECT n_block FROM blocks WHERE block_hash = unhex('{prev_block_hash.hex()}') LIMIT 1"
         result = self.client.execute(query)
         
-        assert len(result) > 0, f"Block {block.hash} not found in blocks table"
+        if len(result) == 0:
+            return None
+            
         assert len(result) == 1, f"Multiple blocks found for hash {block.hash}"
-        block.height = result[0][0] + 1
+
+        return result[0][0] + 1
     
     def daemon_load_new_blocks_from_file(self, blockfile_path, stored_hashes, xor_key=None):
         try:
             stored_hashes_set = set(stored_hashes)
             
-            for block_raw in get_blocks(blockfile_path, xor_key):
-                block = Block(block_raw, None)
-                block_hash = self._hex2hash32(block.hash)
-                
-                if block_hash not in stored_hashes_set:
-                    self.daemon_set_block_height(block)
-                    inputs_data, outputs_data, blocks_data = self.parse_block(block)
+            while True:
+
+                n_skipped = 0
+                for block_raw in get_blocks(blockfile_path, xor_key):
+                    block = Block(block_raw, None)
+                    block_hash = self._hex2hash32(block.hash)
                     
-                    if inputs_data is not None:
-                        self.insert_data(inputs_data, outputs_data, [blocks_data])
-            
+                    if block_hash not in stored_hashes_set:
+
+                        block_height = self.block_height(block)
+                        if block_height is None:
+                            n_skipped += 1
+                            continue
+
+                        block.height = block_height
+                        inputs_data, outputs_data, blocks_data = self.parse_block(block)
+                        
+                        if inputs_data is not None:
+                            self.insert_data(inputs_data, outputs_data, [blocks_data])
+
+                        stored_hashes_set.add(block_hash)
+
+                if n_skipped == 0:
+                    break
+
             return True
             
         except Exception as e:
