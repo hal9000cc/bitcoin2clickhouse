@@ -9,7 +9,7 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from clickhouse_driver.writer import MAX_INT64
 from dotenv import load_dotenv
-from src.bitcoin2clickhouse import BitcoinClickHouseLoader
+from bitcoin2clickhouse import BitcoinClickHouseLoader
 
 def format_error_with_location(error, context=""):
     """Format error with file and line number information"""
@@ -118,7 +118,7 @@ class Bitcoin2ClickHouseBulkLoad:
             unloaded_blocks.sort(key=lambda x: x.height)
             self.logger.info(f"Sorted blocks from {min(block_idx.height for block_idx in unloaded_blocks)} to {max(block_idx.height for block_idx in unloaded_blocks)}")
             
-            max_chunk_size = 1008
+            max_chunk_size = 100
             remaining_blocks = unloaded_blocks.copy()
             completed_rounds = 0
             

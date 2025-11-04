@@ -8,8 +8,6 @@ import logging
 import glob
 from dotenv import load_dotenv
 import traceback
-# from blockchain_parser.blockchain import get_blocks
-# from blockchain_parser.block import Block
 from bitcoin2clickhouse import BitcoinClickHouseLoader
 
 def format_error_with_location(error, context=""):

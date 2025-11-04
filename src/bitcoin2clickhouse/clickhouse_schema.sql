@@ -28,8 +28,9 @@ CREATE TABLE tran_in (
     witness_count UInt32,
     witness_data Array(String),
     input_size UInt16,
-    is_coinbase UInt8
-) ENGINE = ReplacingMergeTree()
+    is_coinbase UInt8,
+    created_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (n_block, tx_id, input_index)
 SETTINGS index_granularity = 8192;
 
@@ -38,6 +39,7 @@ CREATE TABLE tran_out (
     tx_id FixedString(32),
     output_index UInt32,
     value UInt64 CODEC(Delta, LZ4),
+    is_coinbase UInt8,
     script_hex String,
     script_type LowCardinality(String),
     is_p2pkh UInt8,
@@ -137,14 +139,32 @@ SELECT
     now() AS updated_at
 FROM blocks;
 
+CREATE TABLE tx_block
+(
+    tx_id FixedString(32),
+    n_block UInt32
+)
+ENGINE = ReplacingMergeTree()
+ORDER BY tx_id
+SETTINGS index_granularity = 8192;
+
+CREATE MATERIALIZED VIEW tx_block_mv TO tx_block
+AS
+SELECT DISTINCT
+    tx_id,
+    n_block
+FROM tran_out;
+
 CREATE TABLE turnover
 (
     time DateTime,
     tx_id FixedString(32),
     address String,
-    value Float64
+    value Decimal64(8),
+    is_coinbase UInt8,
+    updated_at DateTime DEFAULT now()
 )
-ENGINE = ReplacingMergeTree()
+ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (time, tx_id, address)
 SETTINGS index_granularity = 8192;
 
@@ -152,7 +172,7 @@ CREATE TABLE turnover_m
 (
     time_month Date,
     address String,
-    value Float64,
+    value Decimal64(8),
     updated_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
@@ -164,11 +184,11 @@ CREATE TABLE turnover_y
 (
     time_year Date,
     address String,
-    value Float64,
+    value Decimal64(8),
     updated_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
-PARTITION BY toYYYY(time_year)
+PARTITION BY toYear(time_year)
 ORDER BY (time_year, address)
 SETTINGS index_granularity = 8192;
 

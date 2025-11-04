@@ -171,7 +171,8 @@ class BitcoinClickHouseLoader:
                     'witness_count': len(input_tx.witnesses),
                     'witness_data': [w.hex() for w in input_tx.witnesses],
                     'input_size': input_tx.size,
-                    'is_coinbase': 1 if transaction.is_coinbase() else 0
+                    'is_coinbase': 1 if transaction.is_coinbase() else 0,
+                    'created_at': datetime.now()
                 }
                 inputs_data.append(input_data)
             
@@ -184,6 +185,7 @@ class BitcoinClickHouseLoader:
                     'tx_id': self._hex2hash32(transaction.txid),
                     'output_index': output_index,
                     'value': output_tx.value,
+                    'is_coinbase': 1 if transaction.is_coinbase() else 0,
                     'script_hex': output_tx.script.hex,
                     'script_type': self._get_output_script_type(output_tx),
                     'is_p2pkh': 1 if output_tx.is_pubkeyhash() else 0,
@@ -302,8 +304,12 @@ class BitcoinClickHouseLoader:
                 'INSERT INTO blocks VALUES',
                 blocks_data
             )
-            block_info = [(block['n_block'], block['block_timestamp'].strftime('%Y-%m-%d %H:%M:%S')) for block in blocks_data]
-            self.logger.info(f"Inserted {len(blocks_data)} blocks: {block_info}")
+            if len(blocks_data) > 2:
+                self.logger.info(f'Inserted {len(blocks_data)} blocks')
+            else:
+                block_info = [(block['n_block'], block['block_timestamp'].strftime('%Y-%m-%d %H:%M:%S')) for block in blocks_data]
+                self.logger.info(f"Inserted {len(blocks_data)} blocks: {block_info}")
+
             if update_stats:
                 self.update_all()
     
@@ -354,40 +360,122 @@ class BitcoinClickHouseLoader:
             block_numbers_str = ','.join(map(str, block_numbers))
             
             self.client.execute(f"""
-                INSERT INTO turnover (time, tx_id, address, value)
-                SELECT 
-                    b.block_timestamp as time,
-                    to.tx_id as tx_id,
-                    to.addresses[1] as address,
-                    sum(to.value / 100000000.0) as value 
-                FROM blocks b FINAL
-                JOIN tran_out to FINAL ON to.n_block = b.n_block
-                WHERE b.n_block IN ({block_numbers_str})
-                  AND to.address_count > 0
-                GROUP BY time, tx_id, address
-            """)
-            
-            self.client.execute(f"""
-                INSERT INTO turnover (time, tx_id, address, value)
-                    WITH needed_tx_ids AS (
-                        SELECT DISTINCT prev_tx_hash
+                INSERT INTO turnover (time, tx_id, address, value, is_coinbase)
+                WITH
+                    ablocks AS (
+                        SELECT 
+                            argMax(block_timestamp, processed_at) AS time,
+                            n_block
+                        FROM blocks
+                        WHERE n_block >= 2817 and n_block < 2818
+                        GROUP BY n_block
+                    ),
+                    bad_trans0 AS (
+                        SELECT 
+                            n_block,
+                            tx_id
+                        FROM (
+                            SELECT 
+                                n_block,
+                                tx_id,
+                                argMax(address_count, created_at) AS latest_address_count
+                            FROM tran_out
+                            WHERE tran_out.n_block IN (SELECT n_block FROM ablocks)
+                            GROUP BY n_block, tx_id
+                        )
+                        WHERE latest_address_count = 0
+                    ),
+                    trans0 AS (
+                            SELECT DISTINCT n_block, tx_id
+                            FROM tran_out t
+                            ANTI JOIN bad_trans0 bt ON t.n_block = bt.n_block AND t.tx_id = bt.tx_id
+                            WHERE t.n_block IN (SELECT n_block FROM ablocks)
+                    ),
+                    ti0 AS (
+                        SELECT 
+                            n_block,
+                            tx_id,
+                            input_index,
+                            argMax(prev_tx_hash, created_at) prev_tx_hash,
+                            argMax(prev_tx_index, created_at) prev_tx_index,
+                            argMax(is_coinbase, created_at) is_coinbase
                         FROM tran_in
-                        WHERE n_block IN ({block_numbers_str})
+                        WHERE (tran_in.n_block, tran_in.tx_id) IN (SELECT n_block, tx_id FROM trans0)
+                        GROUP BY n_block, tx_id, input_index
+                    ),
+                    prev_blocks AS (
+                        SELECT 
+                            tx_id,
+                            n_block
+                        FROM tx_block
+                        WHERE tx_id IN (SELECT prev_tx_hash FROM ti0 WHERE NOT is_coinbase)
+                    ),
+                    prev_to AS (
+                        SELECT 
+                            n_block,
+                            tx_id,
+                            output_index,
+                            argMax(value, created_at) value,
+                            argMax(address_count, created_at) address_count,
+                            argMax(addresses, created_at) addresses
+                        FROM tran_out
+                        WHERE (tran_out.n_block, tran_out.tx_id) IN (SELECT n_block, tx_id FROM prev_blocks)
+                        GROUP BY n_block, tx_id, output_index
+                    ),
+                    bad_trans AS (
+                        SELECT DISTINCT tx_id
+                        FROM prev_to
+                        WHERE address_count = 0
+                    ),
+                    trans AS (
+                        SELECT *
+                        FROM trans0 t
+                        ANTI JOIN bad_trans bt ON t.tx_id = bt.tx_id
+                    ),
+                    to AS (
+                        SELECT 
+                            n_block,
+                            tx_id,
+                            output_index,
+                            argMax(addresses[1], created_at) AS address,
+                            argMax(value, created_at) value,
+                            argMax(is_coinbase, created_at) is_coinbase
+                        FROM tran_out
+                        WHERE (tran_out.n_block, tran_out.tx_id) IN (SELECT n_block, tx_id FROM trans)
+                        GROUP BY n_block, tx_id, output_index
+                    ),
+                    ti AS (
+                        SELECT ti0.*
+                        FROM ti0
+                        ANTI JOIN bad_trans bt ON ti0.tx_id = bt.tx_id
                     )
+                SELECT 
+                    time,
+                    tx_id,
+                    address,
+                    SUM(value) AS value,
+                    is_coinbase
+                FROM (
                     SELECT 
-                        b.block_timestamp as time,
-                        ti.tx_id as tx_id,
-                        to.addresses[1] as address,
-                        -sum(to.value / 100000000.0) as value  
-                    FROM blocks b FINAL
-                    JOIN tran_in ti FINAL ON ti.n_block = b.n_block
-                    JOIN tran_out to FINAL ON 
-                        ti.prev_tx_hash = to.tx_id 
-                        AND ti.input_index = to.output_index 
-                        AND to.address_count > 0
-                        AND to.tx_id IN needed_tx_ids
-                    WHERE b.n_block IN ({block_numbers_str})
-                    GROUP BY time, tx_id, address
+                        b.time AS time,
+                        ti.tx_id AS tx_id,
+                        p.addresses[1] AS address,
+                        cast(-p.value as Decimal128(8)) / 100000000 AS value,
+                        0 AS is_coinbase
+                    FROM ti
+                    JOIN prev_to p ON ti.prev_tx_hash = p.tx_id AND ti.prev_tx_index = p.output_index
+                    JOIN ablocks b ON ti.n_block = b.n_block
+                    UNION ALL
+                    SELECT 
+                        b.time AS time,
+                        to.tx_id AS tx_id,
+                        to.address AS address,
+                        cast(to.value as Decimal128(8)) / 100000000 AS value,
+                        to.is_coinbase AS is_coinbase
+                    FROM to
+                    JOIN ablocks b ON to.n_block = b.n_block
+                )
+                GROUP BY time, tx_id, address, is_coinbase
             """)
             
             self.logger.debug(f"Updated turnover for {len(block_numbers)} blocks")
@@ -411,12 +499,12 @@ class BitcoinClickHouseLoader:
                 FROM turnover FINAL
                 WHERE toStartOfMonth(time) >= (
                     SELECT toStartOfMonth(min(block_timestamp)) 
-                    FROM blocks 
+                    FROM blocks FINAL
                     WHERE n_block IN ({block_numbers_str})
                 )
                   AND toStartOfMonth(time) < (
                     SELECT toStartOfMonth(max(block_timestamp)) + INTERVAL 1 MONTH 
-                    FROM blocks 
+                    FROM blocks FINAL
                     WHERE n_block IN ({block_numbers_str})
                   )
                 GROUP BY time_month, address
@@ -440,17 +528,24 @@ class BitcoinClickHouseLoader:
                     address,
                     sum(value) as value,
                     now() as updated_at
-                FROM turnover_m FINAL
-                WHERE toStartOfYear(time_month) >= (
-                    SELECT toStartOfYear(toStartOfMonth(min(block_timestamp))) 
-                    FROM blocks 
-                    WHERE n_block IN ({block_numbers_str})
+                FROM (
+                    SELECT 
+                        time_month,
+                        address,
+                        argMax(value, updated_at) as value
+                    FROM turnover_m
+                    WHERE toStartOfYear(time_month) >= (
+                        SELECT toStartOfYear(toStartOfMonth(min(block_timestamp))) 
+                        FROM blocks FINAL
+                        WHERE n_block IN ({block_numbers_str})
+                    )
+                      AND toStartOfYear(time_month) < (
+                        SELECT toStartOfYear(toStartOfMonth(max(block_timestamp))) + INTERVAL 1 YEAR 
+                        FROM blocks FINAL
+                        WHERE n_block IN ({block_numbers_str})
+                      )
+                    GROUP BY time_month, address
                 )
-                  AND toStartOfYear(time_month) < (
-                    SELECT toStartOfYear(toStartOfMonth(max(block_timestamp))) + INTERVAL 1 YEAR 
-                    FROM blocks 
-                    WHERE n_block IN ({block_numbers_str})
-                  )
                 GROUP BY time_year, address
             """)
             
@@ -1056,7 +1151,7 @@ class BitcoinClickHouseLoader:
             for i in range(0, len(block_hashes), batch_size):
                 batch = block_hashes[i:i + batch_size]
                 hash_list = ','.join([f"unhex('{hash_bytes.hex()}')" for hash_bytes in batch])
-                query = f"SELECT block_hash FROM blocks WHERE block_hash IN ({hash_list})"
+                query = f"SELECT block_hash FROM blocks FINAL WHERE block_hash IN ({hash_list})"
                 result = self.client.execute(query)
                 stored_hashes.extend([row[0] for row in result])
             
@@ -1073,7 +1168,7 @@ class BitcoinClickHouseLoader:
             block.height = 0
             return
         
-        query = f"SELECT n_block FROM blocks WHERE block_hash = unhex('{prev_block_hash.hex()}') LIMIT 1"
+        query = f"SELECT n_block FROM blocks FINAL WHERE block_hash = unhex('{prev_block_hash.hex()}') LIMIT 1"
         result = self.client.execute(query)
         
         if len(result) == 0:
