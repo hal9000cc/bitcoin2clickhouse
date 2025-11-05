@@ -338,7 +338,6 @@ class BitcoinClickHouseLoader:
                 self.update_turnover_m(block_numbers)
                 self.update_turnover_y(block_numbers)
                 
-                # reset modified flag by inserting new versions
                 block_numbers_str = ','.join(map(str, block_numbers))
                 values = [(nb, 0) for nb in block_numbers]
                 self.client.execute('INSERT INTO blocks_mod (n_block, modified) VALUES', values)
@@ -367,7 +366,7 @@ class BitcoinClickHouseLoader:
                             argMax(block_timestamp, processed_at) AS time,
                             n_block
                         FROM blocks
-                        WHERE n_block >= 2817 and n_block < 2818
+                        WHERE n_block IN ({block_numbers_str})
                         GROUP BY n_block
                     ),
                     bad_trans0 AS (
@@ -453,7 +452,7 @@ class BitcoinClickHouseLoader:
                     time,
                     tx_id,
                     address,
-                    SUM(value) AS value,
+                    sum(value) AS value,
                     is_coinbase
                 FROM (
                     SELECT 
@@ -491,22 +490,37 @@ class BitcoinClickHouseLoader:
             
             self.client.execute(f"""
                 INSERT INTO turnover_m (time_month, address, value, updated_at)
+                WITH
+                    ablocks AS (
+                        SELECT 
+                            argMax(block_timestamp, processed_at) AS time,
+                            n_block
+                        FROM blocks
+                        WHERE n_block IN ({block_numbers_str})
+                        GROUP BY n_block
+                    ),
+                    month AS (
+                        SELECT DISTINCT 
+                            toStartOfMonth(time) AS time_start,
+                            toStartOfMonth(time) + INTERVAL 1 MONTH AS time_end
+                        FROM ablocks
+                    )
                 SELECT 
-                    toStartOfMonth(time) as time_month,
+                    toStartOfMonth(time) AS time_month,
                     address,
-                    sum(value) as value,
-                    now() as updated_at
-                FROM turnover FINAL
-                WHERE toStartOfMonth(time) >= (
-                    SELECT toStartOfMonth(min(block_timestamp)) 
-                    FROM blocks FINAL
-                    WHERE n_block IN ({block_numbers_str})
+                    sum(value) AS value
+                FROM (
+                    SELECT 
+                        time,
+                        address,
+                        argMax(value, updated_at) AS value
+                    FROM turnover t
+                    JOIN month m ON t.time >= m.time_start AND t.time < m.time_end
+                    WHERE 
+                        t.time >= (SELECT min(ms.time_start) FROM month ms)
+                        AND t.time < (SELECT max(me.time_end) FROM month me)
+                    GROUP BY time, tx_id, address
                 )
-                  AND toStartOfMonth(time) < (
-                    SELECT toStartOfMonth(max(block_timestamp)) + INTERVAL 1 MONTH 
-                    FROM blocks FINAL
-                    WHERE n_block IN ({block_numbers_str})
-                  )
                 GROUP BY time_month, address
             """)
             
@@ -522,28 +536,36 @@ class BitcoinClickHouseLoader:
             block_numbers_str = ','.join(map(str, block_numbers))
             
             self.client.execute(f"""
-                INSERT INTO turnover_y (time_year, address, value, updated_at)
+                INSERT INTO turnover_y (time_year, address, value)
+                WITH
+                    ablocks AS (
+                        SELECT 
+                            argMax(block_timestamp, processed_at) AS time,
+                            n_block
+                        FROM blocks
+                        WHERE n_block IN ({block_numbers_str})
+                        GROUP BY n_block
+                    ),
+                    year AS (
+                        SELECT DISTINCT 
+                            toStartOfYear(toStartOfMonth(time)) AS time_start,
+                            toStartOfYear(toStartOfMonth(time)) + INTERVAL 1 YEAR AS time_end
+                        FROM ablocks
+                    )
                 SELECT 
-                    toStartOfYear(time_month) as time_year,
+                    toStartOfYear(time_month) AS time_year,
                     address,
-                    sum(value) as value,
-                    now() as updated_at
+                    sum(value) AS value
                 FROM (
                     SELECT 
                         time_month,
                         address,
-                        argMax(value, updated_at) as value
-                    FROM turnover_m
-                    WHERE toStartOfYear(time_month) >= (
-                        SELECT toStartOfYear(toStartOfMonth(min(block_timestamp))) 
-                        FROM blocks FINAL
-                        WHERE n_block IN ({block_numbers_str})
-                    )
-                      AND toStartOfYear(time_month) < (
-                        SELECT toStartOfYear(toStartOfMonth(max(block_timestamp))) + INTERVAL 1 YEAR 
-                        FROM blocks FINAL
-                        WHERE n_block IN ({block_numbers_str})
-                      )
+                        argMax(value, updated_at) AS value
+                    FROM turnover_m t
+                    JOIN year y ON toStartOfYear(t.time_month) >= y.time_start AND toStartOfYear(t.time_month) < y.time_end
+                    WHERE 
+                        toStartOfYear(time_month) >= (SELECT min(ys.time_start) FROM year ys)
+                        AND toStartOfYear(time_month) < (SELECT max(ye.time_end) FROM year ye)
                     GROUP BY time_month, address
                 )
                 GROUP BY time_year, address
@@ -557,7 +579,7 @@ class BitcoinClickHouseLoader:
 
         try:
             result = self.client.execute(
-                'SELECT count() as total_count, MAX(n_block) as last_height FROM blocks'
+                'SELECT count() as total_count, max(n_block) as last_height FROM blocks'
             )
             if result and result[0][0] == 0:
                 return -1
@@ -670,7 +692,7 @@ class BitcoinClickHouseLoader:
                 
                 for missing_end_block in missing_block_numbers:
                     max_existing_result = self.client.execute("""
-                        SELECT MAX(n_block)
+                        SELECT max(n_block)
                         FROM blocks
                         WHERE n_block <= %(missing_end_block)s
                     """, {'missing_end_block': missing_end_block})
@@ -861,7 +883,7 @@ class BitcoinClickHouseLoader:
         self.logger.info(f"Check {check_number}: transaction_hash consistency between tran_in and tran_out...")
         
         try:
-            max_block_result = self.client.execute("SELECT MAX(n_block) FROM tran_in")
+            max_block_result = self.client.execute("SELECT max(n_block) FROM tran_in")
             max_block = max_block_result[0][0] if max_block_result[0][0] is not None else 0
             
             missing_in_tran_out = []
@@ -982,11 +1004,11 @@ class BitcoinClickHouseLoader:
         
         try:
             result = self.client.execute("""
-                SELECT b.n_block, MIN(b.transaction_count), COUNT(DISTINCT ti.tx_id) as actual_count
+                SELECT b.n_block, min(b.transaction_count), count(DISTINCT ti.tx_id) as actual_count
                 FROM blocks b
                 LEFT JOIN tran_in ti ON b.n_block = ti.n_block
                 GROUP BY b.n_block
-                HAVING MIN(b.transaction_count) != actual_count
+                HAVING min(b.transaction_count) != actual_count
             """)
             
             inconsistent_counts_in = [f"Block {row[0]}: declared {row[1]} transactions, actual in tran_in {row[2]}" for row in result]
@@ -997,11 +1019,11 @@ class BitcoinClickHouseLoader:
                 self.logger.error(error)
             
             result = self.client.execute("""
-                SELECT b.n_block, MIN(b.transaction_count), COUNT(DISTINCT to.tx_id) as actual_count
+                SELECT b.n_block, min(b.transaction_count), count(DISTINCT to.tx_id) as actual_count
                 FROM blocks b
                 LEFT JOIN tran_out to ON b.n_block = to.n_block
                 GROUP BY b.n_block
-                HAVING MIN(b.transaction_count) != actual_count
+                HAVING min(b.transaction_count) != actual_count
             """)
             
             inconsistent_counts_out = [f"Block {row[0]}: declared {row[1]} transactions, actual in tran_out {row[2]}" for row in result]
