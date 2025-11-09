@@ -2,7 +2,7 @@ import sys
 import os
 import logging
 import glob
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from clickhouse_driver import Client
 from clickhouse_driver.writer import MAX_INT64
 from blockchain_parser.blockchain import Blockchain
@@ -29,7 +29,7 @@ class BitcoinClickHouseLoader:
                  update_batch_size=None):
         """Initialize ClickHouse connection"""
         self.logger = logging.getLogger(__name__)
-        self._setup_logging()
+        self.setup_logging()
         self.database = database
         self.clickhouse_host = clickhouse_host
         self.clickhouse_port = clickhouse_port
@@ -42,11 +42,11 @@ class BitcoinClickHouseLoader:
         
         self.client = self.database_connect()
         self.stop_requested = False
-
+    
     def request_stop(self):
         self.stop_requested = True
     
-    def _setup_logging(self):
+    def setup_logging(self):
         if not self.logger.handlers:
             formatter = logging.Formatter(
                 '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -160,13 +160,13 @@ class BitcoinClickHouseLoader:
             for input_index, input_tx in enumerate(transaction.inputs):
                 input_data = {
                     'n_block': block.height,
-                    'tx_id': self._hex2hash32(transaction.txid),
+                    'tx_id': self.hex2hash32(transaction.txid),
                     'input_index': input_index,
-                    'prev_tx_hash': self._hex2hash32(input_tx.transaction_hash),
+                    'prev_tx_hash': self.hex2hash32(input_tx.transaction_hash),
                     'prev_tx_index': input_tx.transaction_index,
                     'sequence_number': input_tx.sequence_number,
                     'script_hex': input_tx.script.hex,
-                    'script_type': self._get_script_type(input_tx.script),
+                    'script_type': self.get_script_type(input_tx.script),
                     'is_segwit': 1 if transaction.is_segwit else 0,
                     'witness_count': len(input_tx.witnesses),
                     'witness_data': [w.hex() for w in input_tx.witnesses],
@@ -182,12 +182,12 @@ class BitcoinClickHouseLoader:
                 
                 output_data = {
                     'n_block': block.height,
-                    'tx_id': self._hex2hash32(transaction.txid),
+                    'tx_id': self.hex2hash32(transaction.txid),
                     'output_index': output_index,
                     'value': output_tx.value,
                     'is_coinbase': 1 if transaction.is_coinbase() else 0,
                     'script_hex': output_tx.script.hex,
-                    'script_type': self._get_output_script_type(output_tx),
+                    'script_type': self.get_output_script_type(output_tx),
                     'is_p2pkh': 1 if output_tx.is_pubkeyhash() else 0,
                     'is_p2sh': 1 if output_tx.is_p2sh() else 0,
                     'is_p2wpkh': 1 if output_tx.is_p2wpkh() else 0,
@@ -204,12 +204,12 @@ class BitcoinClickHouseLoader:
                 outputs_data.append(output_data)
         
         block_data = {
-            'block_hash': self._hex2hash32(block.hash),
+            'block_hash': self.hex2hash32(block.hash),
             'n_block': block.height,
             'block_timestamp': block_timestamp,
             'version': block.header.version,
-            'prev_block_hash': self._hex2hash32(block.header.previous_block_hash),
-            'merkle_root': self._hex2hash32(block.header.merkle_root),
+            'prev_block_hash': self.hex2hash32(block.header.previous_block_hash),
+            'merkle_root': self.hex2hash32(block.header.merkle_root),
             'nonce': block.header.nonce,
             'bits': block.header.bits,
             'size': block.size,
@@ -221,14 +221,14 @@ class BitcoinClickHouseLoader:
         return inputs_data, outputs_data, block_data
     
     @staticmethod
-    def _hex2hash32(hex_string):
+    def hex2hash32(hex_string):
         """Convert hex string to bytes for FixedString(32)"""
         if not hex_string:
             return b'\x00' * 32
         return bytes.fromhex(hex_string)
     
     @staticmethod
-    def _to_hex(value):
+    def to_hex(value):
         if value is None:
             return ''
         if hasattr(value, 'hex'):
@@ -246,8 +246,52 @@ class BitcoinClickHouseLoader:
         except Exception:
             return str(value)
     
+    @staticmethod
+    def start_of_month(dt):
+        """Get start of month as date from datetime or date."""
+        if isinstance(dt, datetime):
+            return dt.date().replace(day=1)
+        elif isinstance(dt, date):
+            return dt.replace(day=1)
+        else:
+            return dt
     
-    def _get_script_type(self, script):
+    @staticmethod
+    def next_month(dt):
+        """Get start of next month as datetime from datetime or date."""
+        if isinstance(dt, datetime):
+            dt_date = dt.date()
+        elif isinstance(dt, date):
+            dt_date = dt
+        else:
+            dt_date = dt
+        
+        if dt_date.month == 12:
+            next_month_date = date(dt_date.year + 1, 1, 1)
+        else:
+            next_month_date = date(dt_date.year, dt_date.month + 1, 1)
+        
+        return datetime.combine(next_month_date, datetime.min.time())
+    
+    @staticmethod
+    def prev_month(dt):
+        """Get start of previous month as date from datetime or date."""
+        if isinstance(dt, datetime):
+            dt_date = dt.date()
+        elif isinstance(dt, date):
+            dt_date = dt
+        else:
+            dt_date = dt
+        
+        if dt_date.month == 1:
+            prev_month_date = date(dt_date.year - 1, 12, 1)
+        else:
+            prev_month_date = date(dt_date.year, dt_date.month - 1, 1)
+        
+        return prev_month_date
+    
+    
+    def get_script_type(self, script):
         if script.is_pubkey():
             return 'pubkey'
         elif script.is_pubkeyhash():
@@ -263,7 +307,7 @@ class BitcoinClickHouseLoader:
         else:
             return 'unknown'
     
-    def _get_output_script_type(self, output):
+    def get_output_script_type(self, output):
         if output.is_pubkey():
             return 'pubkey'
         elif output.is_pubkeyhash():
@@ -313,52 +357,58 @@ class BitcoinClickHouseLoader:
             if update_stats:
                 self.update_all()
     
+    def change_point(self, table_name):
+        """
+        Get change point block number from turnover_change_point or turnover_m_change_point table.
+        
+        Args:
+            table_name: 'turnover' or 'turnover_m'
+            
+        Returns:
+            Block number or None if not found
+        """
+        change_point_table = f'{table_name}_change_point'
+
+        result = self.client.execute(f"SELECT count(), argMax(n_block, version) FROM {change_point_table}")
+        if result and result[0] and result[0][0] is not None and result[0][0] > 0:
+            return result[0][1]
+        
+        result = self.client.execute("SELECT min(n_block) FROM blocks")
+        if result and result[0] and result[0][0] is not None:
+            return result[0][0] - 1
+        
+        return -1
+    
+    def block_time(self, n_block):
+        """
+        Get block_timestamp for a specific block number.
+        
+        Args:
+            n_block: Block number
+            
+        Returns:
+            block_timestamp (datetime) or None if block not found
+        """
+        result = self.client.execute(
+            "SELECT count(), argMax(block_timestamp, processed_at) FROM blocks WHERE n_block = %(block)s",
+            {'block': n_block}
+        )
+        if result and result[0] and result[0][0] is not None and result[0][0] > 0:
+            return result[0][1]
+        return None
+    
     def update_all(self):
         try:
-            initial_result = self.client.execute("SELECT count() FROM blocks_mod FINAL WHERE modified = 1")
-            remaining_count = initial_result[0][0] if initial_result else 0
-            
-            if remaining_count == 0:
-                return
-            
-            while True:
-                if self.stop_requested:
-                    self.logger.info("Stop requested, exiting update_all loop")
-                    break
-                result = self.client.execute(
-                    f"SELECT n_block FROM blocks_mod FINAL WHERE modified = 1 ORDER BY n_block LIMIT {self.update_batch_size}"
-                )
-                if not result or len(result) == 0:
-                    break
-                
-                block_numbers = [row[0] for row in result]
-                self.logger.debug(f"Processing batch of {len(block_numbers)} blocks")
-                
-                self.update_turnover(block_numbers)
-                self.update_turnover_m(block_numbers)
-                self.update_turnover_y(block_numbers)
-                
-                block_numbers_str = ','.join(map(str, block_numbers))
-                values = [(nb, 0) for nb in block_numbers]
-                self.client.execute('INSERT INTO blocks_mod (n_block, modified) VALUES', values)
-                
-                remaining_count -= len(block_numbers)
-                
-                self.logger.info(f"Processed and reset {len(block_numbers)} blocks in blocks_mod, {remaining_count} remaining")
+            self.update_turnover()
+            self.update_turnover_m()
         except KeyboardInterrupt:
             self.logger.info("Update interrupted by user (Ctrl+C)")
             raise
         except Exception as e:
             self.logger.error(format_error_with_location(e, f"Error in update_all: "))
     
-    def update_turnover(self, block_numbers):
-        try:
-            if not block_numbers:
-                return
-            
-            block_numbers_str = ','.join(map(str, block_numbers))
-            
-            self.client.execute(f"""
+    def update_turnover_query(self):
+        return """
                 INSERT INTO turnover (time, tx_id, address, value, is_coinbase)
                 WITH
                     ablocks AS (
@@ -366,31 +416,10 @@ class BitcoinClickHouseLoader:
                             argMax(block_timestamp, processed_at) AS time,
                             n_block
                         FROM blocks
-                        WHERE n_block IN ({block_numbers_str})
+                        WHERE n_block IN (SELECT n_block FROM temp_blocks)
                         GROUP BY n_block
                     ),
-                    bad_trans0 AS (
-                        SELECT 
-                            n_block,
-                            tx_id
-                        FROM (
-                            SELECT 
-                                n_block,
-                                tx_id,
-                                argMax(address_count, created_at) AS latest_address_count
-                            FROM tran_out
-                            WHERE tran_out.n_block IN (SELECT n_block FROM ablocks)
-                            GROUP BY n_block, tx_id
-                        )
-                        WHERE latest_address_count = 0
-                    ),
-                    trans0 AS (
-                            SELECT DISTINCT n_block, tx_id
-                            FROM tran_out t
-                            ANTI JOIN bad_trans0 bt ON t.n_block = bt.n_block AND t.tx_id = bt.tx_id
-                            WHERE t.n_block IN (SELECT n_block FROM ablocks)
-                    ),
-                    ti0 AS (
+                    ti AS (
                         SELECT 
                             n_block,
                             tx_id,
@@ -399,7 +428,7 @@ class BitcoinClickHouseLoader:
                             argMax(prev_tx_index, created_at) prev_tx_index,
                             argMax(is_coinbase, created_at) is_coinbase
                         FROM tran_in
-                        WHERE (tran_in.n_block, tran_in.tx_id) IN (SELECT n_block, tx_id FROM trans0)
+                        WHERE n_block IN (SELECT n_block FROM ablocks)
                         GROUP BY n_block, tx_id, input_index
                     ),
                     prev_blocks AS (
@@ -407,7 +436,7 @@ class BitcoinClickHouseLoader:
                             tx_id,
                             n_block
                         FROM tx_block
-                        WHERE tx_id IN (SELECT prev_tx_hash FROM ti0 WHERE NOT is_coinbase)
+                        WHERE tx_id IN (SELECT prev_tx_hash FROM ti WHERE NOT is_coinbase)
                     ),
                     prev_to AS (
                         SELECT 
@@ -416,37 +445,29 @@ class BitcoinClickHouseLoader:
                             output_index,
                             argMax(value, created_at) value,
                             argMax(address_count, created_at) address_count,
-                            argMax(addresses, created_at) addresses
+                            argMax(addresses, created_at) addresses,
+                            argMax(is_op_return, created_at) is_op_return
                         FROM tran_out
                         WHERE (tran_out.n_block, tran_out.tx_id) IN (SELECT n_block, tx_id FROM prev_blocks)
                         GROUP BY n_block, tx_id, output_index
-                    ),
-                    bad_trans AS (
-                        SELECT DISTINCT tx_id
-                        FROM prev_to
-                        WHERE address_count = 0
-                    ),
-                    trans AS (
-                        SELECT *
-                        FROM trans0 t
-                        ANTI JOIN bad_trans bt ON t.tx_id = bt.tx_id
                     ),
                     to AS (
                         SELECT 
                             n_block,
                             tx_id,
                             output_index,
-                            argMax(addresses[1], created_at) AS address,
+                            multiIf(
+                                argMax(address_count, created_at) > 0,
+                                argMax(addresses[1], created_at),
+                                argMax(is_op_return, created_at) = 1,
+                                '',
+                                concat('_', hex(argMax(tx_id, created_at)), '_', toString(argMax(output_index, created_at)))
+                            ) AS address,
                             argMax(value, created_at) value,
                             argMax(is_coinbase, created_at) is_coinbase
                         FROM tran_out
-                        WHERE (tran_out.n_block, tran_out.tx_id) IN (SELECT n_block, tx_id FROM trans)
+                        WHERE n_block IN (SELECT n_block FROM ablocks)
                         GROUP BY n_block, tx_id, output_index
-                    ),
-                    ti AS (
-                        SELECT ti0.*
-                        FROM ti0
-                        ANTI JOIN bad_trans bt ON ti0.tx_id = bt.tx_id
                     )
                 SELECT 
                     time,
@@ -458,7 +479,13 @@ class BitcoinClickHouseLoader:
                     SELECT 
                         b.time AS time,
                         ti.tx_id AS tx_id,
-                        p.addresses[1] AS address,
+                        multiIf(
+                            p.address_count > 0,
+                            p.addresses[1],
+                            p.is_op_return = 1,
+                            '',
+                            concat('_', hex(ti.prev_tx_hash), '_', toString(ti.prev_tx_index))
+                        ) AS address,
                         cast(-p.value as Decimal128(8)) / 100000000 AS value,
                         0 AS is_coinbase
                     FROM ti
@@ -475,105 +502,199 @@ class BitcoinClickHouseLoader:
                     JOIN ablocks b ON to.n_block = b.n_block
                 )
                 GROUP BY time, tx_id, address, is_coinbase
-            """)
+                HAVING value != 0
+                """
+    
+    def clear_turnover(self, last_actual_block):
+        """
+        Clear turnover data starting from the specified block.
+        
+        Args:
+            last_actual_block: Block number to start clearing from (if < 0, truncates entire table)
+        """
+        if last_actual_block < 0:
+            self.client.execute("TRUNCATE TABLE turnover")
+            return
+        
+        last_actual_block_date = self.block_time(last_actual_block)
+        
+        result = self.client.execute(
+            "SELECT count() FROM turnover WHERE time > %(start_date)s",
+            {'start_date': last_actual_block_date}
+        )
+        if result and result[0] and result[0][0] > 0:
+            self.client.execute(
+                "ALTER TABLE turnover DELETE WHERE time > %(start_date)s SETTINGS mutations_sync = 2",
+                {'start_date': last_actual_block_date}
+            )
+    
+    def update_turnover(self):
+        try:
+            last_actual_block = self.change_point('turnover')
             
-            self.logger.debug(f"Updated turnover for {len(block_numbers)} blocks")
+            self.clear_turnover(last_actual_block)
+            
+            start_processing_block = last_actual_block + 1
+            
+            result = self.client.execute(
+                "SELECT count(DISTINCT n_block), min(n_block), max(n_block) FROM blocks WHERE n_block >= %(start_block)s",
+                {'start_block': start_processing_block}
+            )
+            if not result or result[0][0] == 0:
+                return
+            
+            total_count, min_block, max_block = result[0]
+            
+            if total_count == 0 or min_block is None or max_block is None:
+                return
+            
+            self.logger.info(f"Updating turnover for blocks {min_block} to {max_block} ({total_count} blocks)")
+            
+            current_block = start_processing_block
+            processed_count = 0
+            
+            while current_block <= max_block:
+                if self.stop_requested:
+                    self.logger.info("Stop requested, exiting update_turnover loop")
+                    break
+                
+                end_block = min(current_block + self.update_batch_size - 1, max_block)
+                
+                result = self.client.execute(
+                    "SELECT DISTINCT n_block FROM blocks WHERE n_block >= %(start)s AND n_block <= %(end)s ORDER BY n_block",
+                    {'start': current_block, 'end': end_block}
+                )
+                if not result or len(result) == 0:
+                    break
+                
+                block_numbers = [row[0] for row in result]
+                
+                try:
+                    self.client.execute('DROP TABLE IF EXISTS temp_blocks')
+                except:
+                    pass
+                self.client.execute('CREATE TEMPORARY TABLE temp_blocks (n_block UInt32) ENGINE = Memory')
+                self.client.execute('INSERT INTO temp_blocks VALUES', [(nb,) for nb in block_numbers])
+                
+                self.client.execute(self.update_turnover_query())
+                
+                max_block_in_batch = max(block_numbers)
+                self.client.execute(
+                    "INSERT INTO turnover_change_point (n_block, version) VALUES",
+                    [(max_block_in_batch, datetime.now())]
+                )
+                
+                processed_count += len(block_numbers)
+                remaining_count = total_count - processed_count
+                self.logger.info(f"Updated turnover for blocks {min(block_numbers)}-{max_block_in_batch} ({len(block_numbers)} blocks, {remaining_count} remaining)")
+                
+                current_block = max_block_in_batch + 1
         except Exception as e:
             self.logger.error(format_error_with_location(e, f"Error in update_turnover: "))
     
-    def update_turnover_m(self, block_numbers):
+    def update_turnover_m_query(self):
+        return """
+                    INSERT INTO turnover_m (time_month, address, value)
+                    SELECT 
+                        toStartOfMonth(time) AS time_month,
+                        address,
+                        sum(value) AS value
+                    FROM (
+                        SELECT 
+                            time,
+                            address,
+                            argMax(value, updated_at) AS value
+                        FROM turnover t
+                        WHERE 
+                            t.time >= %(time_start)s
+                            AND t.time < %(time_end)s
+                        GROUP BY time, tx_id, address
+                    )
+                    GROUP BY time_month, address
+                """
+    
+    def clear_turnover_m(self, start_block):
+        """
+        Clear turnover_m data starting from the specified block.
+        
+        Args:
+            start_block: Block number to start clearing from
+        """
+        if start_block < 0:
+            self.client.execute("TRUNCATE TABLE turnover_m")
+            return
+        
+        start_block_date = self.block_time(start_block)
+        start_month = self.start_of_month(start_block_date)
+        
+        result = self.client.execute(
+            "SELECT DISTINCT toYYYYMM(time_month) AS partition_id FROM turnover_m WHERE time_month >= %(start_month)s",
+            {'start_month': start_month}
+        )
+        if result:
+            for row in result:
+                partition_id = str(row[0])
+                self.client.execute(f"ALTER TABLE turnover_m DROP PARTITION '{partition_id}'")
+    
+    def update_turnover_m(self):
         try:
-            if not block_numbers:
+            start_block = self.change_point('turnover_m')
+            
+            self.clear_turnover_m(start_block)
+            
+            if start_block < 0:
+                start_month = date(2000, 1, 1)
+            else:
+                start_block_date = self.block_time(start_block)
+                start_month = self.start_of_month(start_block_date)
+            
+            result = self.client.execute(
+                "SELECT max(block_timestamp) FROM (SELECT argMax(block_timestamp, processed_at) AS block_timestamp FROM blocks GROUP BY n_block)"
+            )
+            if not result or not result[0] or result[0][0] is None:
                 return
             
-            block_numbers_str = ','.join(map(str, block_numbers))
+            max_block_date = result[0][0]
+            max_block_month = self.start_of_month(max_block_date)
+            last_completed_month = self.prev_month(max_block_month)
             
-            self.client.execute(f"""
-                INSERT INTO turnover_m (time_month, address, value, updated_at)
-                WITH
-                    ablocks AS (
-                        SELECT 
-                            argMax(block_timestamp, processed_at) AS time,
-                            n_block
-                        FROM blocks
-                        WHERE n_block IN ({block_numbers_str})
-                        GROUP BY n_block
-                    ),
-                    month AS (
-                        SELECT DISTINCT 
-                            toStartOfMonth(time) AS time_start,
-                            toStartOfMonth(time) + INTERVAL 1 MONTH AS time_end
-                        FROM ablocks
-                    )
-                SELECT 
-                    toStartOfMonth(time) AS time_month,
-                    address,
-                    sum(value) AS value
-                FROM (
-                    SELECT 
-                        time,
-                        address,
-                        argMax(value, updated_at) AS value
-                    FROM turnover t
-                    JOIN month m ON t.time >= m.time_start AND t.time < m.time_end
-                    WHERE 
-                        t.time >= (SELECT min(ms.time_start) FROM month ms)
-                        AND t.time < (SELECT max(me.time_end) FROM month me)
-                    GROUP BY time, tx_id, address
+            if start_month > last_completed_month:
+                return
+            
+            result = self.client.execute(
+                "SELECT DISTINCT toStartOfMonth(time) AS time_month FROM turnover WHERE toStartOfMonth(time) >= %(start_month)s AND toStartOfMonth(time) <= %(last_month)s ORDER BY time_month",
+                {'start_month': start_month, 'last_month': last_completed_month}
+            )
+            
+            if not result:
+                return
+            
+            months_to_process = [row[0] for row in result]
+            
+            for time_month in months_to_process:
+                if self.stop_requested:
+                    self.logger.info("Stop requested, exiting update_turnover_m loop")
+                    break
+                
+                time_start = datetime.combine(time_month, datetime.min.time())
+                time_end = time_start + timedelta(days=32)
+                time_end = time_end.replace(day=1)
+                
+                self.client.execute(self.update_turnover_m_query(), {
+                    'time_start': time_start,
+                    'time_end': time_end
+                })
+                
+                self.client.execute(
+                    "INSERT INTO turnover_m_change_point (n_block, version) "
+                    "SELECT max(n_block), now() FROM blocks WHERE block_timestamp < %(time_end)s",
+                    {'time_end': time_end}
                 )
-                GROUP BY time_month, address
-            """)
-            
-            self.logger.debug(f"Updated turnover_m for {len(block_numbers)} blocks")
+                
+                month_str = time_month.strftime('%Y-%m')
+                self.logger.info(f"Updated turnover_m for month {month_str}")
         except Exception as e:
             self.logger.error(format_error_with_location(e, f"Error in update_turnover_m: "))
-    
-    def update_turnover_y(self, block_numbers):
-        try:
-            if not block_numbers:
-                return
-            
-            block_numbers_str = ','.join(map(str, block_numbers))
-            
-            self.client.execute(f"""
-                INSERT INTO turnover_y (time_year, address, value)
-                WITH
-                    ablocks AS (
-                        SELECT 
-                            argMax(block_timestamp, processed_at) AS time,
-                            n_block
-                        FROM blocks
-                        WHERE n_block IN ({block_numbers_str})
-                        GROUP BY n_block
-                    ),
-                    year AS (
-                        SELECT DISTINCT 
-                            toStartOfYear(toStartOfMonth(time)) AS time_start,
-                            toStartOfYear(toStartOfMonth(time)) + INTERVAL 1 YEAR AS time_end
-                        FROM ablocks
-                    )
-                SELECT 
-                    toStartOfYear(time_month) AS time_year,
-                    address,
-                    sum(value) AS value
-                FROM (
-                    SELECT 
-                        time_month,
-                        address,
-                        argMax(value, updated_at) AS value
-                    FROM turnover_m t
-                    JOIN year y ON toStartOfYear(t.time_month) >= y.time_start AND toStartOfYear(t.time_month) < y.time_end
-                    WHERE 
-                        toStartOfYear(time_month) >= (SELECT min(ys.time_start) FROM year ys)
-                        AND toStartOfYear(time_month) < (SELECT max(ye.time_end) FROM year ye)
-                    GROUP BY time_month, address
-                )
-                GROUP BY time_year, address
-            """)
-            
-            self.logger.debug(f"Updated turnover_y for {len(block_numbers)} blocks")
-        except Exception as e:
-            self.logger.error(format_error_with_location(e, f"Error in update_turnover_y: "))
     
     def last_stored_block(self):
 
@@ -724,25 +845,69 @@ class BitcoinClickHouseLoader:
         self.logger.info(f"Found {len(unique_blocks)} total unloaded blocks")
         return unique_blocks
 
-    def check_database_integrity(self):
-        """Check database integrity. Returns list of errors."""
+    def check_database_integrity(self, check_numbers=None, batch_size=None, start_block=None, end_block=None):
+        """
+        Check database integrity. Returns list of errors.
+        
+        Args:
+            check_numbers: List of check numbers to run (1-8). If None, all checks will run.
+            batch_size: Batch size for checks that process blocks in batches. Ignored for checks that do not use batches.
+            start_block: Start block number for checks that process blocks. Ignored for checks that do not use blocks.
+            end_block: End block number for checks that process blocks. Ignored for checks that do not use blocks.
+        """
         errors = []
+        
+        # Map check numbers to their methods
+        check_methods = {
+            1: self.check_genesis_block,
+            2: self.check_block_sequence,
+            3: self.check_transaction_count_consistency,
+            4: self.check_n_block_consistency,
+            5: self.check_prev_block_hash_consistency,
+            6: self.check_transaction_hash_consistency,
+            7: self.check_prev_tx_hash_consistency,
+            8: self.check_turnover_completeness,
+        }
+        
+        # If no specific checks requested, run all
+        if check_numbers is None:
+            check_numbers = list(check_methods.keys())
+        
+        # Validate check numbers
+        invalid_checks = [c for c in check_numbers if c not in check_methods]
+        if invalid_checks:
+            error = f"Invalid check numbers: {invalid_checks}. Valid range is 1-8."
+            errors.append(error)
+            self.logger.error(error)
+            return errors
         
         self.logger.info("Starting database integrity check...")
         
         try:
-            errors.extend(self._check_genesis_block(check_number=1))
-            errors.extend(self._check_block_sequence(check_number=2))
-            errors.extend(self._check_transaction_count_consistency(check_number=3))
-            errors.extend(self._check_n_block_consistency(check_number=4))
-
-            if errors:
-                self.logger.error(f"Check 1-4 completed. Next steps skipped. Found {len(errors)} errors.")
-                return errors
-
-            errors.extend(self._check_prev_block_hash_consistency(check_number=5))
-            errors.extend(self._check_transaction_hash_consistency(check_number=6))
-            errors.extend(self._check_prev_tx_hash_consistency(check_number=7))
+            # First group of checks (1-4)
+            first_group = [c for c in check_numbers if c in [1, 2, 3, 4]]
+            if first_group:
+                for check_num in sorted(first_group):
+                    errors.extend(check_methods[check_num](check_number=check_num))
+                
+                if errors:
+                    self.logger.error(f"Check 1-4 completed. Next steps skipped. Found {len(errors)} errors.")
+                    return errors
+            
+            # Second group of checks (5-8) - only run if first group passed or wasn't requested
+            second_group = [c for c in check_numbers if c in [5, 6, 7, 8]]
+            if second_group:
+                for check_num in sorted(second_group):
+                    if check_num == 8:
+                        # Pass batch_size, start_block, end_block only to check_turnover_completeness
+                        errors.extend(check_methods[check_num](
+                            check_number=check_num,
+                            batch_size=batch_size,
+                            start_block=start_block,
+                            end_block=end_block
+                        ))
+                    else:
+                        errors.extend(check_methods[check_num](check_number=check_num))
             
             if errors:
                 self.logger.error(f"Check completed. Found {len(errors)} errors.")
@@ -757,7 +922,7 @@ class BitcoinClickHouseLoader:
             self.logger.error(error)
             return errors
 
-    def _check_genesis_block(self, check_number: int):
+    def check_genesis_block(self, check_number: int):
         """Block with number 0 exists. Returns list of errors."""
         errors = []
         
@@ -779,7 +944,7 @@ class BitcoinClickHouseLoader:
         
         return errors
 
-    def _check_n_block_consistency(self, check_number: int):
+    def check_n_block_consistency(self, check_number: int):
         """n_block consistency between tables. Returns list of errors."""
         errors = []
         
@@ -844,7 +1009,7 @@ class BitcoinClickHouseLoader:
         
         return errors
 
-    def _check_prev_block_hash_consistency(self, check_number: int):
+    def check_prev_block_hash_consistency(self, check_number: int):
         """prev_block_hash consistency. Returns list of errors."""
         errors = []
         
@@ -874,7 +1039,7 @@ class BitcoinClickHouseLoader:
         
         return errors
 
-    def _check_transaction_hash_consistency(self, check_number: int):
+    def check_transaction_hash_consistency(self, check_number: int):
         """transaction_hash consistency between tran_in and tran_out. Returns list of errors."""
         errors = []
         block_batch_size = 100000
@@ -959,7 +1124,7 @@ class BitcoinClickHouseLoader:
         
         return errors
 
-    def _check_prev_tx_hash_consistency(self, check_number: int):
+    def check_prev_tx_hash_consistency(self, check_number: int):
         """prev_tx_hash from tran_in matches transactions in tran_out. Returns list of errors."""
 
         errors = []
@@ -980,7 +1145,7 @@ class BitcoinClickHouseLoader:
             
             if result:
                 display_errors = [
-                    f"{self._to_hex(row[0])} (in transaction {self._to_hex(row[1])}, input {row[2]})"
+                    f"{self.to_hex(row[0])} (in transaction {self.to_hex(row[1])}, input {row[2]})"
                     for row in result
                 ]
                 error = f"Error: prev_tx_hash from tran_in missing in tran_out: {display_errors}"
@@ -996,7 +1161,7 @@ class BitcoinClickHouseLoader:
         
         return errors
     
-    def _check_transaction_count_consistency(self, check_number: int):
+    def check_transaction_count_consistency(self, check_number: int):
         """transaction_count matches actual transaction count in tran_in/tran_out. Returns list of errors."""
         errors = []
         
@@ -1043,7 +1208,7 @@ class BitcoinClickHouseLoader:
         
         return errors
     
-    def _check_block_sequence(self, check_number: int):
+    def check_block_sequence(self, check_number: int):
         """n_block sequence without gaps. Returns list of errors."""
         errors = []
         
@@ -1078,6 +1243,189 @@ class BitcoinClickHouseLoader:
         
         except Exception as e:
             error = f"Error in check {check_number} (block sequence): {e}"
+            errors.append(error)
+            self.logger.error(error)
+        
+        return errors
+    
+    def check_turnover_completeness(self, check_number: int, batch_size=None, start_block=None, end_block=None):
+        """
+        Check that all transactions from blocks are present in turnover table. Returns list of errors.
+        
+        Args:
+            check_number: Check number
+            batch_size: Batch size for processing blocks (default: 10000). Ignored if None.
+            start_block: Start block number. If None, uses min(n_block) from blocks.
+            end_block: End block number. If None, uses max(n_block) from blocks.
+        """
+        errors = []
+        
+        self.logger.info(f"Check {check_number}: completeness of turnover...")
+        
+        # Default batch size
+        if batch_size is None:
+            batch_size = 10000
+        
+        try:
+            # Get block range from database if not fully specified
+            result = self.client.execute("""
+                SELECT min(n_block), max(n_block)
+                FROM blocks
+            """)
+            
+            if not result or not result[0] or result[0][0] is None:
+                self.logger.info("✓ No blocks to check turnover completeness")
+                return errors
+            
+            db_min_block, db_max_block = result[0]
+            
+            if db_min_block is None or db_max_block is None:
+                self.logger.info("✓ No blocks to check turnover completeness")
+                return errors
+            
+            # Use provided values or database values
+            min_block = start_block if start_block is not None else db_min_block
+            max_block = end_block if end_block is not None else db_max_block
+            
+            if max_block > db_max_block:
+                max_block = db_max_block
+            
+            self.logger.info(f"Checking turnover completeness for blocks {min_block} to {max_block} (batch size: {batch_size})")
+            
+            missing_blocks = []
+            current_block = min_block
+            
+            while current_block <= max_block:
+                batch_end_block = min(current_block + batch_size - 1, max_block)
+                
+                result = self.client.execute("""
+                    WITH
+                        ablocks AS (
+                            SELECT 
+                                argMax(block_timestamp, processed_at) AS time,
+                                n_block
+                            FROM blocks
+                            WHERE n_block >= %(start_block)s AND n_block <= %(end_block)s
+                            GROUP BY n_block
+                        ),
+                        ti AS (
+                            SELECT 
+                                n_block,
+                                tx_id,
+                                input_index,
+                                argMax(prev_tx_hash, created_at) prev_tx_hash,
+                                argMax(prev_tx_index, created_at) prev_tx_index,
+                                argMax(is_coinbase, created_at) is_coinbase
+                            FROM tran_in
+                            WHERE n_block IN (SELECT n_block FROM ablocks)
+                            GROUP BY n_block, tx_id, input_index
+                        ),
+                        prev_blocks AS (
+                            SELECT 
+                                tx_id,
+                                n_block
+                            FROM tx_block
+                            WHERE tx_id IN (SELECT prev_tx_hash FROM ti WHERE NOT is_coinbase)
+                        ),
+                        prev_to AS (
+                            SELECT 
+                                n_block,
+                                tx_id,
+                                output_index,
+                                argMax(value, created_at) value,
+                                argMax(address_count, created_at) address_count,
+                                argMax(addresses, created_at) addresses,
+                                argMax(is_op_return, created_at) is_op_return
+                            FROM tran_out
+                            WHERE (tran_out.n_block, tran_out.tx_id) IN (SELECT n_block, tx_id FROM prev_blocks)
+                            GROUP BY n_block, tx_id, output_index
+                        ),
+                        to AS (
+                            SELECT 
+                                n_block,
+                                tx_id,
+                                output_index,
+                                multiIf(
+                                    argMax(address_count, created_at) > 0,
+                                    argMax(addresses[1], created_at),
+                                    argMax(is_op_return, created_at) = 1,
+                                    '',
+                                    concat('_', hex(argMax(tx_id, created_at)), '_', toString(argMax(output_index, created_at)))
+                                ) AS address,
+                                argMax(value, created_at) value,
+                                argMax(is_coinbase, created_at) is_coinbase
+                            FROM tran_out
+                            WHERE n_block IN (SELECT n_block FROM ablocks)
+                            GROUP BY n_block, tx_id, output_index
+                        ),
+                        tv AS (
+                            SELECT DISTINCT time, tx_id 
+                            FROM turnover 
+                            WHERE time IN (SELECT time FROM ablocks)
+                        ),
+                        dtx AS (
+                            SELECT 
+                                time,
+                                tx_id tx_id,
+                                sum(value) AS value
+                            FROM (
+                                SELECT 
+                                    b.time AS time,
+                                    ti.tx_id AS tx_id,
+                                    cast(-p.value as Decimal128(8)) / 100000000 AS value
+                                FROM ti
+                                JOIN prev_to p ON ti.prev_tx_hash = p.tx_id AND ti.prev_tx_index = p.output_index
+                                JOIN ablocks b ON ti.n_block = b.n_block
+                                UNION ALL
+                                SELECT 
+                                    b.time AS time,
+                                    to.tx_id AS tx_id,
+                                    cast(to.value as Decimal128(8)) / 100000000 AS value
+                                FROM to
+                                JOIN ablocks b ON to.n_block = b.n_block
+                            )
+                            GROUP BY time, tx_id
+                            HAVING value != 0
+                        ),
+                        wrong_tx AS (
+                            SELECT DISTINCT dtx.tx_id
+                            FROM dtx 
+                            ANTI JOIN tv ON tv.time = dtx.time AND tv.tx_id = dtx.tx_id
+                        )
+                    SELECT 
+                        to.n_block,
+                        count(*)
+                    FROM tran_out to
+                    WHERE to.tx_id IN (SELECT tx_id FROM wrong_tx)
+                    GROUP BY to.n_block
+                """, {
+                    'start_block': current_block,
+                    'end_block': batch_end_block
+                })
+                
+                if result:
+                    batch_missing = [(row[0], row[1]) for row in result]  # (n_block, count)
+                    missing_blocks.extend(batch_missing)
+                    total_missing_tx = sum(count for _, count in batch_missing)
+                    self.logger.warning(f"Found {len(batch_missing)} blocks with {total_missing_tx} missing transactions in turnover for blocks {current_block}-{batch_end_block}")
+                
+                self.logger.info(f"Checked blocks {current_block}-{batch_end_block} ({batch_end_block - current_block + 1} blocks)")
+                
+                current_block = batch_end_block + 1
+            
+            if missing_blocks:
+                total_missing_tx = sum(count for _, count in missing_blocks)
+                # Limit error message to first 50 blocks
+                display_missing = missing_blocks[:50]
+                display_text = [f"Block {n_block}: {count} transactions" for n_block, count in display_missing]
+                error = f"Error: {len(missing_blocks)} blocks with {total_missing_tx} missing transactions in turnover table. First 50 blocks: {display_text}"
+                errors.append(error)
+                self.logger.error(error)
+            else:
+                self.logger.info("✓ Turnover completeness is correct")
+        
+        except Exception as e:
+            error = f"Error in check {check_number} (turnover completeness): {e}"
             errors.append(error)
             self.logger.error(error)
         
@@ -1144,7 +1492,6 @@ class BitcoinClickHouseLoader:
                             inputs_batch = []
                             outputs_batch = []
                             blocks_batch = []
-                        
                 except Exception as e:
                     logger.error(format_error_with_location(e, f"Worker {worker_id}: Error processing block {block_idx.height}: "))
                     raise e
@@ -1162,12 +1509,12 @@ class BitcoinClickHouseLoader:
             block_hashes = []
             for block_raw in get_blocks(blockfile_path, xor_key):
                 block = Block(block_raw, None)
-                block_hash = self._hex2hash32(block.hash)
+                block_hash = self.hex2hash32(block.hash)
                 block_hashes.append(block_hash)
             
             if not block_hashes:
                 return []
-            
+
             stored_hashes = []
             batch_size = 1000
             for i in range(0, len(block_hashes), batch_size):
@@ -1182,10 +1529,10 @@ class BitcoinClickHouseLoader:
         except Exception as e:
             self.logger.error(format_error_with_location(e, f"Error in daemon_find_stored_blocks: "))
             return []
-    
+
     def block_height(self, block):
         
-        prev_block_hash = self._hex2hash32(block.header.previous_block_hash)
+        prev_block_hash = self.hex2hash32(block.header.previous_block_hash)
         if prev_block_hash == b'\x00' * 32:
             block.height = 0
             return
@@ -1209,7 +1556,7 @@ class BitcoinClickHouseLoader:
                 n_skipped = 0
                 for block_raw in get_blocks(blockfile_path, xor_key):
                     block = Block(block_raw, None)
-                    block_hash = self._hex2hash32(block.hash)
+                    block_hash = self.hex2hash32(block.hash)
                     
                     if block_hash not in stored_hashes_set:
 

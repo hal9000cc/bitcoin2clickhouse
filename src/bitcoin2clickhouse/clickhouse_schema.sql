@@ -64,8 +64,6 @@ CREATE TABLE db_version (
 ORDER BY version
 SETTINGS index_granularity = 8192;
 
-INSERT INTO db_version VALUES (1);
-
 CREATE VIEW blocks_h AS
 SELECT 
     hex(block_hash) as block_hash_h,
@@ -121,24 +119,6 @@ SELECT
     created_at
 FROM tran_out;
 
-CREATE TABLE blocks_mod
-(
-    n_block UInt32,
-    modified UInt8,
-    updated_at DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY n_block
-SETTINGS index_granularity = 8192;
-
-CREATE MATERIALIZED VIEW blocks_mod_mv TO blocks_mod
-AS
-SELECT 
-    n_block,
-    1 AS modified,
-    now() AS updated_at
-FROM blocks;
-
 CREATE TABLE tx_block
 (
     tx_id FixedString(32),
@@ -180,15 +160,43 @@ PARTITION BY toYYYYMM(time_month)
 ORDER BY (time_month, address)
 SETTINGS index_granularity = 8192;
 
-CREATE TABLE turnover_y
+CREATE TABLE turnover_change_point
 (
-    time_year Date,
-    address String,
-    value Decimal64(8),
-    updated_at DateTime DEFAULT now()
+    n_block UInt32,
+    version DateTime DEFAULT now()
 )
-ENGINE = ReplacingMergeTree(updated_at)
-PARTITION BY toYear(time_year)
-ORDER BY (time_year, address)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY tuple()
 SETTINGS index_granularity = 8192;
+
+CREATE MATERIALIZED VIEW turnover_change_point_mv TO turnover_change_point
+AS
+SELECT 
+    min_block AS n_block,
+    now() AS version
+FROM (
+    SELECT (SELECT min(n_block) FROM blocks) AS min_block
+)
+WHERE min_block < COALESCE((SELECT argMax(n_block, version) FROM turnover_change_point), 999999999);
+
+CREATE TABLE turnover_m_change_point
+(
+    n_block UInt32,
+    version DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY tuple()
+SETTINGS index_granularity = 8192;
+
+CREATE MATERIALIZED VIEW turnover_m_change_point_mv TO turnover_m_change_point
+AS
+SELECT 
+    min_block AS n_block,
+    now() AS version
+FROM (
+    SELECT (SELECT min(n_block) FROM blocks) AS min_block
+)
+WHERE min_block < COALESCE((SELECT argMax(n_block, version) FROM turnover_m_change_point), 999999999);
+
+INSERT INTO db_version VALUES (1);
 

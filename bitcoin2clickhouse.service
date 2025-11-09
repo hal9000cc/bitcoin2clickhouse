@@ -1,0 +1,26 @@
+[Unit]
+Description=Bitcoin2ClickHouse Daemon - Bitcoin blockchain parser and ClickHouse loader
+After=network.target clickhouse-server.service
+Requires=clickhouse-server.service
+
+[Service]
+Type=simple
+User=bitcoin
+Group=bitcoin
+WorkingDirectory=/home/bitcoin/Projects/bitcoin2clickhouse
+Environment="PATH=/home/bitcoin/Projects/bitcoin2clickhouse/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/bitcoin/Projects/bitcoin2clickhouse/.env
+ExecStart=/home/bitcoin/Projects/bitcoin2clickhouse/venv/bin/python /home/bitcoin/Projects/bitcoin2clickhouse/src/bitcoin2clickhouse-daemon.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bitcoin2clickhouse
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
