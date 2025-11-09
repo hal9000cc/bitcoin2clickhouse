@@ -9,4 +9,4 @@ __version__ = "0.1.0"
 __author__ = "hal9000cc"
 __email__ = "hal9000cc@gmail.com"
 
-from .bitcoin2clickhouse import BitcoinClickHouseLoader
+from .bitcoin2clickhouse import BitcoinClickHouseLoader, setup_logging

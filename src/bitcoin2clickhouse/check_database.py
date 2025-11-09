@@ -88,11 +88,7 @@ def main():
     log_filename = setup_logging()
     logger = logging.getLogger(__name__)
     
-    clickhouse_host = os.getenv('CLICKHOUSE_HOST', 'localhost')
-    clickhouse_port = int(os.getenv('CLICKHOUSE_PORT', '9000'))
-    clickhouse_user = os.getenv('CLICKHOUSE_USER', 'default')
-    clickhouse_password = os.getenv('CLICKHOUSE_PASSWORD', '')
-    clickhouse_database = os.getenv('CLICKHOUSE_DATABASE', 'bitcoin')
+    params = BitcoinClickHouseLoader.get_connection_params_from_env()
     
     if args.check:
         invalid_checks = [c for c in args.check if c < 1 or c > 8]
@@ -106,18 +102,12 @@ def main():
         logger.info("Starting database integrity check (all checks)")
     
     logger.info(f"Log file: {log_filename}")
-    logger.info(f"Connecting to ClickHouse: {clickhouse_host}:{clickhouse_port}")
-    logger.info(f"Database: {clickhouse_database}")
+    logger.info(f"Connecting to ClickHouse: {params['host']}:{params['port']}")
+    logger.info(f"Database: {params['database']}")
     logger.info("-" * 50)
     
     try:
-        loader = BitcoinClickHouseLoader(
-            clickhouse_host=clickhouse_host,
-            clickhouse_port=clickhouse_port,
-            clickhouse_user=clickhouse_user,
-            clickhouse_password=clickhouse_password,
-            database=clickhouse_database
-        )
+        loader = BitcoinClickHouseLoader(connection_params=params)
         
         errors = loader.check_database_integrity(
             check_numbers=check_numbers,

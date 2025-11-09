@@ -172,12 +172,10 @@ SETTINGS index_granularity = 8192;
 CREATE MATERIALIZED VIEW turnover_change_point_mv TO turnover_change_point
 AS
 SELECT 
-    min_block AS n_block,
+    n_block,
     now() AS version
-FROM (
-    SELECT (SELECT min(n_block) FROM blocks) AS min_block
-)
-WHERE min_block < COALESCE((SELECT argMax(n_block, version) FROM turnover_change_point), 999999999);
+FROM blocks
+WHERE n_block < COALESCE((SELECT argMax(n_block, version) FROM turnover_change_point), 999999999);
 
 CREATE TABLE turnover_m_change_point
 (
@@ -191,12 +189,10 @@ SETTINGS index_granularity = 8192;
 CREATE MATERIALIZED VIEW turnover_m_change_point_mv TO turnover_m_change_point
 AS
 SELECT 
-    min_block AS n_block,
+    n_block,
     now() AS version
-FROM (
-    SELECT (SELECT min(n_block) FROM blocks) AS min_block
-)
-WHERE min_block < COALESCE((SELECT argMax(n_block, version) FROM turnover_m_change_point), 999999999);
+FROM blocks
+WHERE n_block < COALESCE((SELECT argMax(n_block, version) FROM turnover_m_change_point), 999999999);
 
 INSERT INTO db_version VALUES (1);
 

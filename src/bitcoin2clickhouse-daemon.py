@@ -6,9 +6,10 @@ import time
 import signal
 import logging
 import glob
-from dotenv import load_dotenv
+import argparse
+import subprocess
+import shutil
 import traceback
-from bitcoin2clickhouse import BitcoinClickHouseLoader
 
 def format_error_with_location(error, context=""):
     """Format error with file and line number information"""
@@ -38,15 +39,19 @@ def get_last_block_file(blocks_dir):
 
 class Bitcoin2ClickHouseDaemon:
     def __init__(self):
+        from dotenv import load_dotenv
+        from bitcoin2clickhouse import BitcoinClickHouseLoader
+        
         load_dotenv()
         
         self._setup_logging()
         
-        self.clickhouse_host = os.getenv('CLICKHOUSE_HOST', 'localhost')
-        self.clickhouse_port = int(os.getenv('CLICKHOUSE_PORT', '9000'))
-        self.clickhouse_user = os.getenv('CLICKHOUSE_USER', 'default')
-        self.clickhouse_password = os.getenv('CLICKHOUSE_PASSWORD', '')
-        self.clickhouse_database = os.getenv('CLICKHOUSE_DATABASE', 'bitcoin')
+        params = BitcoinClickHouseLoader.get_connection_params_from_env()
+        self.clickhouse_host = params['host']
+        self.clickhouse_port = params['port']
+        self.clickhouse_user = params['user']
+        self.clickhouse_password = params['password']
+        self.clickhouse_database = params['database']
         
         self.bitcoin_blocks_dir = os.getenv('BITCOIN_BLOCKS_DIR', '/home/user/.bitcoin/blocks')
         self.xor_dat_path = os.getenv('XOR_DAT_PATH', None)
@@ -60,30 +65,9 @@ class Bitcoin2ClickHouseDaemon:
         signal.signal(signal.SIGTERM, self._signal_handler)
     
     def _setup_logging(self):
+        from bitcoin2clickhouse import setup_logging
         self.logger = logging.getLogger(__name__)
-        if not self.logger.handlers:
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            
-            log_dir = os.getenv('BITCOIN2CLICKHOUSE_LOG_DIR', '/var/log/bitcoin2clickhouse')
-            log_file = os.getenv('BITCOIN2CLICKHOUSE_LOG_FILE', os.path.join(log_dir, 'daemon.log'))
-            
-            try:
-                os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                file_handler = logging.FileHandler(log_file)
-                file_handler.setLevel(logging.INFO)
-                file_handler.setFormatter(formatter)
-                self.logger.addHandler(file_handler)
-            except PermissionError:
-                self.logger.warning(f"Cannot write to {log_file}, using stdout only")
-            
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
-            console_handler.setFormatter(formatter)
-            
-            self.logger.setLevel(logging.INFO)
-            self.logger.addHandler(console_handler)
+        setup_logging(self.logger, 'daemon.log')
     
     def _signal_handler(self, signum, frame):
         self.logger.info(f"Received signal {signum}. Shutting down gracefully...")
@@ -106,15 +90,17 @@ class Bitcoin2ClickHouseDaemon:
         return True
     
     def _initialize_loader(self):
+        from bitcoin2clickhouse import BitcoinClickHouseLoader
         try:
             self.logger.info("Initializing Bitcoin2ClickHouse loader...")
-            self.loader = BitcoinClickHouseLoader(
-                clickhouse_host=self.clickhouse_host,
-                clickhouse_port=self.clickhouse_port,
-                clickhouse_user=self.clickhouse_user,
-                clickhouse_password=self.clickhouse_password,
-                database=self.clickhouse_database
-            )
+            params = {
+                'host': self.clickhouse_host,
+                'port': self.clickhouse_port,
+                'user': self.clickhouse_user,
+                'password': self.clickhouse_password,
+                'database': self.clickhouse_database
+            }
+            self.loader = BitcoinClickHouseLoader(connection_params=params)
             self.logger.info("Loader initialized successfully")
             return True
         except Exception as e:
@@ -234,9 +220,185 @@ class Bitcoin2ClickHouseDaemon:
         self.logger.info("Daemon stopped")
         return 0
 
+def get_service_name():
+    """Get systemd service name"""
+    return "bitcoin2clickhouse"
+
+def get_service_file_path():
+    """Get path to systemd service file"""
+    return f"/etc/systemd/system/{get_service_name()}.service"
+
+def create_service_file():
+    """Create systemd service file content"""
+    # Get absolute paths
+    script_path = os.path.abspath(__file__)
+    
+    # Get working directory (project root - go up from src/bitcoin2clickhouse-daemon.py)
+    # script_path is in src/, so go up one level
+    working_dir = os.path.dirname(os.path.dirname(script_path))
+    env_file = os.path.join(working_dir, '.env')
+    
+    # Try to find Python in venv first, then use system Python
+    venv_python = os.path.join(working_dir, 'venv', 'bin', 'python3')
+    venv_bin = os.path.join(working_dir, 'venv', 'bin')
+    
+    # Check if venv Python exists and is executable
+    if os.path.exists(venv_python) and os.access(venv_python, os.X_OK):
+        python_path = venv_python
+        path_env = f"{venv_bin}:/usr/local/bin:/usr/bin:/bin"
+    else:
+        # Fallback to system Python
+        python_path = shutil.which('python3') or sys.executable
+        path_env = f"{os.path.dirname(python_path)}:/usr/local/bin:/usr/bin:/bin"
+    
+    # Get user from environment, SUDO_USER (when running under sudo), or current user
+    service_user = os.getenv('SERVICE_USER') or os.getenv('SUDO_USER') or os.getenv('USER', 'root')
+    
+    # Add PYTHONPATH to include src directory for editable installs
+    src_dir = os.path.join(working_dir, 'src')
+    pythonpath = f"{src_dir}:{os.environ.get('PYTHONPATH', '')}"
+    
+    service_content = f"""[Unit]
+Description=Bitcoin2ClickHouse Daemon - Bitcoin blockchain parser and ClickHouse loader
+After=network.target clickhouse-server.service
+Requires=clickhouse-server.service
+
+[Service]
+Type=simple
+User={service_user}
+Group={service_user}
+WorkingDirectory={working_dir}
+Environment="PATH={path_env}"
+Environment="PYTHONPATH={pythonpath}"
+"""
+    
+    if os.path.exists(env_file):
+        service_content += f'EnvironmentFile={env_file}\n'
+    
+    service_content += f"""ExecStart={python_path} {script_path}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={get_service_name()}
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+"""
+    
+    return service_content
+
+def install_service():
+    """Install systemd service"""
+    if os.geteuid() != 0:
+        print("Error: Root privileges required to install systemd service")
+        print("Please run: sudo bitcoin2clickhouse-daemon --install")
+        return 1
+    
+    service_file_path = get_service_file_path()
+    service_content = create_service_file()
+    
+    try:
+        # Write service file
+        with open(service_file_path, 'w') as f:
+            f.write(service_content)
+        
+        print(f"Service file created: {service_file_path}")
+        
+        # Reload systemd
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        print("Systemd daemon reloaded")
+        
+        # Enable service
+        subprocess.run(['systemctl', 'enable', get_service_name()], check=True)
+        print(f"Service {get_service_name()} enabled")
+        
+        print(f"\nService installed successfully!")
+        print(f"To start the service, run: sudo systemctl start {get_service_name()}")
+        print(f"To check status, run: sudo systemctl status {get_service_name()}")
+        
+        return 0
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing systemctl command: {e}")
+        return 1
+    except Exception as e:
+        print(f"Error installing service: {e}")
+        return 1
+
+def uninstall_service():
+    """Uninstall systemd service"""
+    if os.geteuid() != 0:
+        print("Error: Root privileges required to uninstall systemd service")
+        print("Please run: sudo bitcoin2clickhouse-daemon --uninstall")
+        return 1
+    
+    service_file_path = get_service_file_path()
+    service_name = get_service_name()
+    
+    try:
+        # Stop service if running
+        subprocess.run(['systemctl', 'stop', service_name], check=False)
+        
+        # Disable service
+        subprocess.run(['systemctl', 'disable', service_name], check=False)
+        
+        # Remove service file
+        if os.path.exists(service_file_path):
+            os.remove(service_file_path)
+            print(f"Service file removed: {service_file_path}")
+        
+        # Reload systemd
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        print("Systemd daemon reloaded")
+        
+        print(f"\nService {service_name} uninstalled successfully!")
+        
+        return 0
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing systemctl command: {e}")
+        return 1
+    except Exception as e:
+        print(f"Error uninstalling service: {e}")
+        return 1
+
 def main():
-    daemon = Bitcoin2ClickHouseDaemon()
-    return daemon.run()
+    parser = argparse.ArgumentParser(
+        description='Bitcoin2ClickHouse Daemon',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                    # Run daemon
+  %(prog)s --install          # Install as systemd service (requires root)
+  %(prog)s --uninstall        # Uninstall systemd service (requires root)
+        """
+    )
+    
+    parser.add_argument(
+        '--install',
+        action='store_true',
+        help='Install as systemd service (requires root privileges)'
+    )
+    
+    parser.add_argument(
+        '--uninstall',
+        action='store_true',
+        help='Uninstall systemd service (requires root privileges)'
+    )
+    
+    args = parser.parse_args()
+    
+    if args.install:
+        return install_service()
+    elif args.uninstall:
+        return uninstall_service()
+    else:
+        # Run daemon normally
+        daemon = Bitcoin2ClickHouseDaemon()
+        return daemon.run()
 
 if __name__ == "__main__":
     sys.exit(main())
