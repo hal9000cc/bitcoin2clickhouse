@@ -170,7 +170,7 @@ Critical errors are also sent to systemd journal (when running as a service).
 
 ## Query Examples
 
-#Top 10 wallets by coin amount.
+### Top 10 wallets by coin amount.
 ```sql
 SELECT 
     address,
@@ -197,7 +197,7 @@ LIMIT 10
 
 The data completely matches blockchain explorers at the current moment. Query execution time on my system was 3 minutes.
 
-#Query balance for a single address.
+### Query balance for a single address.
 
 ```sql
 SELECT 
@@ -205,9 +205,11 @@ SELECT
 FROM turnover
 WHERE address = '34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo'
 ```
-sum(value)     |
----------------+
-248597.58110535|
+
+| sum(value) |
+|-----------|
+| 248597.58110535 |
+
 Execution time for this query on my system is around 0.1-0.2 seconds.
 
 But it's better to query balance for a single address differently. Use monthly turnovers up to the current month from the turnover_m table, it's significantly more compact. And add current month turnovers from turnover:
@@ -226,9 +228,11 @@ FROM (
     WHERE time >= '2025-11-01' AND address = '34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo'
 ) sums
 ```
-sum(value)     |
----------------+
-248597.58110535|
+
+| sum(value) |
+|------------|
+| 248597.58110535 |
+
 I can't measure the execution time for this query anymore, the indicator shows 0.0 sec, it's definitely faster than the previous version.
 
 
