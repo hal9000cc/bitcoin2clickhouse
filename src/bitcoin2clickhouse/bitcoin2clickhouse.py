@@ -146,42 +146,28 @@ class BitcoinClickHouseLoader:
             'database': os.getenv('CLICKHOUSE_DATABASE', 'bitcoin')
         }
     
-    def __init__(self, connection_params=None, clickhouse_host=None, clickhouse_port=None, 
-                 clickhouse_user=None, clickhouse_password=None, database=None,
-                 update_batch_size=None):
+    def __init__(self, connection_params=None, turnover_update_batch_size=None):
         """
         Initialize ClickHouse connection
         
         Args:
             connection_params: Dictionary with connection parameters (host, port, user, password, database).
-                              If provided, other individual parameters are ignored.
-            clickhouse_host: ClickHouse host (used if connection_params not provided)
-            clickhouse_port: ClickHouse port (used if connection_params not provided)
-            clickhouse_user: ClickHouse user (used if connection_params not provided)
-            clickhouse_password: ClickHouse password (used if connection_params not provided)
-            database: Database name (used if connection_params not provided)
-            update_batch_size: Batch size for updates
+                              If not provided, will use get_connection_params_from_env().
+            turnover_update_batch_size: Batch size for turnover updates
         """
         self.logger = logging.getLogger(__name__)
         # Don't setup logging here - let the caller configure it
         # This allows daemon to configure all loggers to use the same file
         
         if connection_params:
-            self.clickhouse_host = connection_params['host']
-            self.clickhouse_port = connection_params['port']
-            self.clickhouse_user = connection_params['user']
-            self.clickhouse_password = connection_params['password']
-            self.database = connection_params['database']
+            self.connection_params = connection_params
         else:
-            self.clickhouse_host = clickhouse_host or 'localhost'
-            self.clickhouse_port = clickhouse_port or 8123
-            self.clickhouse_user = clickhouse_user or 'default'
-            self.clickhouse_password = clickhouse_password or ''
-            self.database = database or 'default'
+            # Use environment variables as fallback
+            self.connection_params = BitcoinClickHouseLoader.get_connection_params_from_env()
         
-        if update_batch_size is None:
-            update_batch_size = int(os.getenv('UPDATE_BATCH_SIZE', '10000'))
-        self.update_batch_size = update_batch_size
+        if turnover_update_batch_size is None:
+            turnover_update_batch_size = int(os.getenv('TURNOVER_UPDATE_BATCH_SIZE', '10000'))
+        self.turnover_update_batch_size = turnover_update_batch_size
         
         self.client = self.database_connect()
         self.stop_requested = False
@@ -196,21 +182,21 @@ class BitcoinClickHouseLoader:
     def database_connect(self):
         try:
             default_client = get_client(
-                host=self.clickhouse_host,
-                port=self.clickhouse_port,
-                username=self.clickhouse_user,
-                password=self.clickhouse_password,
+                host=self.connection_params['host'],
+                port=self.connection_params['port'],
+                username=self.connection_params['user'],
+                password=self.connection_params['password'],
                 database='default'
             )
             
-            default_client.command(f'CREATE DATABASE IF NOT EXISTS {self.database}')
+            default_client.command(f'CREATE DATABASE IF NOT EXISTS {self.connection_params["database"]}')
             
             client = get_client(
-                host=self.clickhouse_host,
-                port=self.clickhouse_port,
-                username=self.clickhouse_user,
-                password=self.clickhouse_password,
-                database=self.database
+                host=self.connection_params['host'],
+                port=self.connection_params['port'],
+                username=self.connection_params['user'],
+                password=self.connection_params['password'],
+                database=self.connection_params['database']
             )
             
             self.database_initialize(client)
@@ -697,7 +683,7 @@ class BitcoinClickHouseLoader:
                     self.logger.info("Stop requested, exiting update_turnover loop")
                     break
                 
-                end_block = min(current_block + self.update_batch_size - 1, max_block)
+                end_block = min(current_block + self.turnover_update_batch_size - 1, max_block)
                 
                 result = self.client.query(
                     "SELECT DISTINCT n_block FROM blocks WHERE n_block >= {start:UInt32} AND n_block <= {end:UInt32} ORDER BY n_block",
@@ -1556,7 +1542,7 @@ class BitcoinClickHouseLoader:
         return errors
     
     @staticmethod
-    def load_blocks_worker(blockchain_path, xor_dat_path, block_indexes, batch_size, worker_id, cache_file, clickhouse_host=None, clickhouse_port=None, clickhouse_user=None, clickhouse_password=None, database=None):
+    def load_blocks_worker(blockchain_path, xor_dat_path, block_indexes, batch_size, worker_id, cache_file, connection_params=None):
         """Worker process for loading blocks"""
         try:
             
@@ -1579,13 +1565,11 @@ class BitcoinClickHouseLoader:
                 logger.addHandler(file_handler)
                 logger.addHandler(console_handler)
             
-            worker_loader = BitcoinClickHouseLoader(
-                clickhouse_host=clickhouse_host,
-                clickhouse_port=clickhouse_port,
-                clickhouse_user=clickhouse_user,
-                clickhouse_password=clickhouse_password,
-                database=database
-            )
+            # Use get_connection_params_from_env() if connection_params not provided
+            if connection_params is None:
+                connection_params = BitcoinClickHouseLoader.get_connection_params_from_env()
+            
+            worker_loader = BitcoinClickHouseLoader(connection_params=connection_params)
             
             
             xor_key = None

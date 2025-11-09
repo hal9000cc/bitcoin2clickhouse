@@ -32,11 +32,8 @@ class Bitcoin2ClickHouseBulkLoad:
         
         self._setup_logging()
         
-        self.clickhouse_host = os.getenv('CLICKHOUSE_HOST', 'localhost')
-        self.clickhouse_port = int(os.getenv('CLICKHOUSE_PORT', '9000'))
-        self.clickhouse_user = os.getenv('CLICKHOUSE_USER', 'default')
-        self.clickhouse_password = os.getenv('CLICKHOUSE_PASSWORD', '')
-        self.clickhouse_database = os.getenv('CLICKHOUSE_DATABASE', 'bitcoin')
+        # Get connection parameters using the shared method
+        self.connection_params = BitcoinClickHouseLoader.get_connection_params_from_env()
         
         self.bitcoin_blocks_dir = os.getenv('BITCOIN_BLOCKS_DIR', '/home/user/.bitcoin/blocks')
         self.xor_dat_path = os.getenv('XOR_DAT_PATH', None)
@@ -88,13 +85,8 @@ class Bitcoin2ClickHouseBulkLoad:
     def _initialize_loader(self):
         try:
             self.logger.info("Initializing Bitcoin2ClickHouse loader...")
-            self.loader = BitcoinClickHouseLoader(
-                clickhouse_host=self.clickhouse_host,
-                clickhouse_port=self.clickhouse_port,
-                clickhouse_user=self.clickhouse_user,
-                clickhouse_password=self.clickhouse_password,
-                database=self.clickhouse_database
-            )
+            connection_params = BitcoinClickHouseLoader.get_connection_params_from_env()
+            self.loader = BitcoinClickHouseLoader(connection_params=connection_params)
             self.logger.info("Loader initialized successfully")
             return True
         except Exception as e:
@@ -154,11 +146,7 @@ class Bitcoin2ClickHouseBulkLoad:
                             1000000,
                             i+1,
                             cache_file,
-                            self.clickhouse_host,
-                            self.clickhouse_port,
-                            self.clickhouse_user,
-                            self.clickhouse_password,
-                            self.clickhouse_database
+                            self.connection_params
                         )
                         futures.append(future)
                     
@@ -199,8 +187,8 @@ class Bitcoin2ClickHouseBulkLoad:
     
     def run(self, max_block):
         self.logger.info("Bitcoin2ClickHouse Bulk Load starting...")
-        self.logger.info(f"ClickHouse: {self.clickhouse_host}:{self.clickhouse_port}")
-        self.logger.info(f"Database: {self.clickhouse_database}")
+        self.logger.info(f"ClickHouse: {self.connection_params['host']}:{self.connection_params['port']}")
+        self.logger.info(f"Database: {self.connection_params['database']}")
         self.logger.info(f"Bitcoin blocks: {self.bitcoin_blocks_dir}")
         if self.xor_dat_path:
             self.logger.info(f"XOR dat file: {self.xor_dat_path}")
