@@ -32,8 +32,18 @@ def setup_logging(logger, log_filename=None):
         logger: Logger instance to configure
         log_filename: Optional custom log filename. If None, uses default based on logger name.
     """
-    if logger.handlers:
-        return  # Already configured
+    # Remove existing file handlers if log_filename is specified (to allow reconfiguration)
+    # This ensures we don't create multiple log files
+    if log_filename is not None:
+        for handler in logger.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+                logger.removeHandler(handler)
+    elif logger.handlers:
+        # Check if there's already a file handler - if so, don't reconfigure
+        has_file_handler = any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+        if has_file_handler:
+            return  # Already configured with a file handler
     
     # Custom formatter with single-letter level markers
     class SingleLetterFormatter(logging.Formatter):
@@ -61,11 +71,13 @@ def setup_logging(logger, log_filename=None):
         else:
             default_filename = 'bitcoin2clickhouse.log'
         
-        log_dir = os.getenv('BITCOIN2CLICKHOUSE_LOG_DIR', '/var/log/bitcoin2clickhouse')
-        log_file = os.getenv('BITCOIN2CLICKHOUSE_LOG_FILE', os.path.join(log_dir, default_filename))
+        # Try /var/log first, fallback to ~/.bitcoin2clickhouse
+        log_dir = '/var/log/bitcoin2clickhouse'
+        log_file = os.path.join(log_dir, default_filename)
     else:
-        log_dir = os.getenv('BITCOIN2CLICKHOUSE_LOG_DIR', '/var/log/bitcoin2clickhouse')
-        log_file = os.getenv('BITCOIN2CLICKHOUSE_LOG_FILE', os.path.join(log_dir, log_filename))
+        # Try /var/log first, fallback to ~/.bitcoin2clickhouse
+        log_dir = '/var/log/bitcoin2clickhouse'
+        log_file = os.path.join(log_dir, log_filename)
     
     # Try /var/log first, fallback to ~/.bitcoin2clickhouse
     try:
@@ -151,7 +163,8 @@ class BitcoinClickHouseLoader:
             update_batch_size: Batch size for updates
         """
         self.logger = logging.getLogger(__name__)
-        self.setup_logging()
+        # Don't setup logging here - let the caller configure it
+        # This allows daemon to configure all loggers to use the same file
         
         if connection_params:
             self.clickhouse_host = connection_params['host']

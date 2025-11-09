@@ -44,7 +44,7 @@ class Bitcoin2ClickHouseDaemon:
         
         load_dotenv()
         
-        self._setup_logging()
+        self.setup_logging()
         
         params = BitcoinClickHouseLoader.get_connection_params_from_env()
         self.clickhouse_host = params['host']
@@ -61,15 +61,15 @@ class Bitcoin2ClickHouseDaemon:
         self.loader = None
         self.running = True
         
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
     
-    def _setup_logging(self):
+    def setup_logging(self):
         from bitcoin2clickhouse import setup_logging
         self.logger = logging.getLogger(__name__)
         setup_logging(self.logger, 'daemon.log')
     
-    def _signal_handler(self, signum, frame):
+    def signal_handler(self, signum, frame):
         self.logger.info(f"Received signal {signum}. Shutting down gracefully...")
         if self.loader:
             try:
@@ -78,7 +78,7 @@ class Bitcoin2ClickHouseDaemon:
                 pass
         self.running = False
     
-    def _validate_environment(self):
+    def validate_environment(self):
         if not os.path.exists(self.bitcoin_blocks_dir):
             self.logger.error(f"Bitcoin blocks directory not found: {self.bitcoin_blocks_dir}")
             return False
@@ -89,7 +89,7 @@ class Bitcoin2ClickHouseDaemon:
         
         return True
     
-    def _initialize_loader(self):
+    def initialize_loader(self):
         from bitcoin2clickhouse import BitcoinClickHouseLoader
         try:
             self.logger.info("Initializing Bitcoin2ClickHouse loader...")
@@ -101,6 +101,9 @@ class Bitcoin2ClickHouseDaemon:
                 'database': self.clickhouse_database
             }
             self.loader = BitcoinClickHouseLoader(connection_params=params)
+            # Ensure loader uses the same log file as daemon
+            from bitcoin2clickhouse import setup_logging
+            setup_logging(self.loader.logger, 'daemon.log')
             self.logger.info("Loader initialized successfully")
             return True
         except Exception as e:
@@ -169,10 +172,10 @@ class Bitcoin2ClickHouseDaemon:
         self.logger.info(f"Check period: {self.check_period_sec} seconds")
         self.logger.info("-" * 50)
         
-        if not self._validate_environment():
+        if not self.validate_environment():
             return 1
         
-        if not self._initialize_loader():
+        if not self.initialize_loader():
             return 1
         
         try:
