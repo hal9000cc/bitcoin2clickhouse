@@ -182,18 +182,18 @@ HAVING value > 10000
 ORDER BY value DESC
 LIMIT 10
 ```
-address                                                       |value          |count(tx_id)|
---------------------------------------------------------------+---------------+------------+
-34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo                            |248597.58110535|        5491|
-bc1ql49ydapnjafl5t2cp9zqpjwe6pdgmxy98859v2                    |140574.82562097|         478|
-bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97|130010.07866864|         312|
-3M219KR5vEneNb47ewrPfWyb5jQ2DjxRP6                            |128710.40826881|         488|
-bc1qazcm763858nkj2dj986etajv6wquslv8uxwczt                    | 94643.48489007|         157|
-bc1qjasf9z3h7w3jspkhtgatgpyvvzgpa2wwd2lr0eh5tx44reyn2k7sfc27a4| 87296.46794985|         133|
-bc1qd4ysezhmypwty5dnw7c8nqy5h5nxg0xqsvaefd0qn5kq32vwnwqqgv4rzr| 86200.09870865|         137|
-1FeexV6bAHb8ybZjqQMjJrcCrHGW9sb6uF                            | 79957.26802990|         658|
-bc1q8yj0herd4r4yxszw3nkfvt53433thk0f5qst4g                    | 78317.03554851|          51|
-bc1qa5wkgaew2dkv56kfvj49j0av5nml45x9ek9hz6                    | 69370.18417293|         133|
+| address | value | count(tx_id) |
+|:--------|------:|-------------:|
+| 34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo | 248597.58110535 | 5491 |
+| bc1ql49ydapnjafl5t2cp9zqpjwe6pdgmxy98859v2 | 140574.82562097 | 478 |
+| bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97 | 130010.07866864 | 312 |
+| 3M219KR5vEneNb47ewrPfWyb5jQ2DjxRP6 | 128710.40826881 | 488 |
+| bc1qazcm763858nkj2dj986etajv6wquslv8uxwczt | 94643.48489007 | 157 |
+| bc1qjasf9z3h7w3jspkhtgatgpyvvzgpa2wwd2lr0eh5tx44reyn2k7sfc27a4 | 87296.46794985 | 133 |
+| bc1qd4ysezhmypwty5dnw7c8nqy5h5nxg0xqsvaefd0qn5kq32vwnwqqgv4rzr | 86200.09870865 | 137 |
+| 1FeexV6bAHb8ybZjqQMjJrcCrHGW9sb6uF | 79957.26802990 | 658 |
+| bc1q8yj0herd4r4yxszw3nkfvt53433thk0f5qst4g | 78317.03554851 | 51 |
+| bc1qa5wkgaew2dkv56kfvj49j0av5nml45x9ek9hz6 | 69370.18417293 | 133 |
 
 The data completely matches blockchain explorers at the current moment. Query execution time on my system was 3 minutes.
 
